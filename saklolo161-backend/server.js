@@ -21,6 +21,7 @@ const { initializeFirebase } = require('./config/firebase');
 const { notFoundHandler, errorHandler } = require('./middlewares/errorHandler');
 
 const incidentRoutes = require('./routes/incidentRoutes');
+const weatherRoutes = require('./routes/weatherRoutes');
 
 const app = express();
 
@@ -36,13 +37,14 @@ initializeFirebase();
 app.get('/', (req, res) => {
   res.status(200).json({
     success: true,
-    message: 'Rescue 161 Middleware Gateway is running.',
+    message: 'Saklolo 161 Middleware Gateway is running.',
     environment: NODE_ENV,
   });
 });
 
 // ---- API Routes ------------------------------------------------------------
 app.use('/api/incidents', incidentRoutes);
+app.use('/api/weather-river', weatherRoutes);
 
 // ---- 404 + Error Handlers (must be registered LAST) -----------------------
 app.use(notFoundHandler);
@@ -51,7 +53,7 @@ app.use(errorHandler);
 // ---- Start Server -----------------------------------------------------------
 app.listen(PORT, () => {
   console.log('--------------------------------------------------');
-  console.log(`🚨  Rescue 161 Middleware Gateway`);
+  console.log(`🚨  Saklolo 161 Middleware Gateway`);
   console.log(`🌐  Running at: http://localhost:${PORT}`);
   console.log(`🛠️   Environment: ${NODE_ENV}`);
   console.log('--------------------------------------------------');
