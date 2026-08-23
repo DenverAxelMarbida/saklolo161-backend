@@ -51,7 +51,7 @@ app.use(notFoundHandler);
 app.use(errorHandler);
 
 // ---- Start Server -----------------------------------------------------------
-app.listen(PORT, () => {
+app.listen(PORT, '0.0.0.0', () => {
   console.log('--------------------------------------------------');
   console.log(`🚨  Saklolo 161 Middleware Gateway`);
   console.log(`🌐  Running at: http://localhost:${PORT}`);
