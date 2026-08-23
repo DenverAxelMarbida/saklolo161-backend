@@ -15,6 +15,9 @@ module.exports = {
   PORT: process.env.PORT || 5000,
   NODE_ENV: process.env.NODE_ENV || 'development',
 
+  // OpenWeather Map
+  OPENWEATHER_API_KEY: process.env.OPENWEATHER_API_KEY || '',
+  
   // Mapbox
   MAPBOX_ACCESS_TOKEN: process.env.MAPBOX_ACCESS_TOKEN || '',
 
