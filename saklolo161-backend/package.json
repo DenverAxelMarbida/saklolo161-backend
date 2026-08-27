@@ -27,6 +27,7 @@
     "node-cache": "^5.1.2"
   },
   "devDependencies": {
+    "autocannon": "^8.0.0",
     "nodemon": "^3.1.4"
   }
 }
