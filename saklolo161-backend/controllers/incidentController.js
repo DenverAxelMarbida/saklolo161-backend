@@ -11,7 +11,7 @@ const mockIncidents = require('../data/mockIncidents');
 const mapboxService = require('../services/mapboxService');
 const semaphoreService = require('../services/semaphoreService');
 
-const VALID_STATUSES = ['Pending', 'Dispatched', 'Resolved'];
+const VALID_STATUSES = ['Pending', 'Dispatched', 'En Route', 'Resolved'];
 
 /**
  * Generates a mock incidentId in the format INC-YYYYMMDD-XXXX

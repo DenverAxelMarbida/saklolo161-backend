@@ -8,7 +8,7 @@
  * --------------------------------------------------------------
  */
 
-const VALID_CATEGORIES = ['Medical', 'Fire', 'Flood'];
+const VALID_CATEGORIES = ['Medical', 'Fire', 'Flood', 'Crime'];
 
 function validateIncident(req, res, next) {
   const { citizenPhone, category, location } = req.body;

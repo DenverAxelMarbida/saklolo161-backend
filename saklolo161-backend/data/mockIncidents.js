@@ -69,14 +69,14 @@ let incidents = [
   {
     incidentId: 'INC-20250812-0005',
     citizenPhone: '+639338889900',
-    category: 'Crime',
+    category: 'Medical',
     location: {
       latitude: 14.6221,
       longitude: 121.0902,
       address: 'Brgy. Sto. Niño, Marikina City',
     },
     status: 'Dispatched',
-    notes: 'Robbery reported in convenience store near public market, suspect fled on foot.',
+    notes: 'Motorcycle accident, driver conscious but with visible leg injury.',
     timestamp: '2025-08-12T09:18:00.000Z',
   },
 ];
