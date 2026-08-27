@@ -15,11 +15,15 @@ const {
   getIncidentById,
   updateIncidentStatus,
 } = require('../controllers/incidentController');
+const { dispatchIncident } = require('../controllers/dispatchController');
 
 const validateIncident = require('../middlewares/validateIncident');
 
 // POST /api/incidents - create a new incident report
 router.post('/', validateIncident, createIncident);
+
+// POST /api/incidents/dispatch - assign a station + unit to an incident
+router.post('/dispatch', dispatchIncident);
 
 // GET /api/incidents - list all incidents (mock: 5 seeded records)
 router.get('/', getIncidents);

@@ -1,4 +1,3 @@
-// routes/weatherRoutes.js
 /**
  * routes/weatherRoutes.js
  * --------------------------------------------------------------
