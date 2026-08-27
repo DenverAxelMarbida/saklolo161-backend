@@ -37,7 +37,7 @@ initializeFirebase();
 app.get('/', (req, res) => {
   res.status(200).json({
     success: true,
-    message: 'Rescue 161 Middleware Gateway is running.',
+    message: 'Saklolo 161 Middleware Gateway is running.',
     environment: NODE_ENV,
   });
 });
@@ -53,7 +53,7 @@ app.use(errorHandler);
 // ---- Start Server -----------------------------------------------------------
 app.listen(PORT, () => {
   console.log('--------------------------------------------------');
-  console.log(`🚨  Rescue 161 Middleware Gateway`);
+  console.log(`🚨  Saklolo 161 Middleware Gateway`);
   console.log(`🌐  Running at: http://localhost:${PORT}`);
   console.log(`🛠️   Environment: ${NODE_ENV}`);
   console.log('--------------------------------------------------');

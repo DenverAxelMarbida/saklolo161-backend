@@ -23,7 +23,7 @@ module.exports = {
 
   // Semaphore SMS
   SEMAPHORE_API_KEY: process.env.SEMAPHORE_API_KEY || '',
-  SEMAPHORE_SENDER_NAME: process.env.SEMAPHORE_SENDER_NAME || 'RESCUE161',
+  SEMAPHORE_SENDER_NAME: process.env.SEMAPHORE_SENDER_NAME || 'SAKLOLO161',
 
   // Firebase
   FIREBASE_CREDENTIALS: process.env.FIREBASE_CREDENTIALS || '',

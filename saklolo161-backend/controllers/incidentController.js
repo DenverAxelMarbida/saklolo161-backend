@@ -58,7 +58,7 @@ async function createIncident(req, res, next) {
     // Fire-and-forget confirmation SMS to the citizen (mocked in Phase 1).
     semaphoreService.sendSms(
       citizenPhone,
-      `Rescue 161: Your ${category} report (${newIncident.incidentId}) has been received. Help is on the way.`
+      `Saklolo 161: Your ${category} report (${newIncident.incidentId}) has been received. Help is on the way.`
     );
 
     return res.status(201).json({
@@ -142,7 +142,7 @@ async function updateIncidentStatus(req, res, next) {
     // Notify the citizen of the status change (mocked in Phase 1).
     await semaphoreService.sendSms(
       updated.citizenPhone,
-      `Rescue 161: Your incident ${updated.incidentId} status is now "${status}".`
+      `Saklolo 161: Your incident ${updated.incidentId} status is now "${status}".`
     );
 
     return res.status(200).json({
