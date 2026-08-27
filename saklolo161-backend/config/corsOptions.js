@@ -31,7 +31,7 @@ const corsOptions = {
     if (allowedOrigins.includes(origin) || isLocalNetwork || process.env.NODE_ENV !== 'production') {
            callback(null, true);
     } else {
-      console.warn(`⚠️ CORS blocked request from origin: ${origin}`);
+      console.warn(`⚠️  CORS blocked request from origin: ${origin}`);
       callback(new Error('Not allowed by CORS'));
     }
   },
