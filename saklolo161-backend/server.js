@@ -1,7 +1,7 @@
 /**
  * server.js
  * --------------------------------------------------------------
- * Entry point for the Rescue 161 Middleware Gateway.
+ * Entry point for the Saklolo 161 Middleware Gateway.
  *
  * Responsibilities:
  *  - Load environment config

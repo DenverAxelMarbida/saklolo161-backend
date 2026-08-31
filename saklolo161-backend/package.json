@@ -1,20 +1,20 @@
 {
   "name": "saklolo161-middleware-gateway",
   "version": "1.0.0",
-  "description": "Node.js/Express Middleware Gateway for the Rescue 161 Emergency Response System (Marikina City)",
+  "description": "Node.js/Express Middleware Gateway for the Saklolo 161 Emergency Response System (Marikina City)",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
     "dev": "nodemon server.js"
   },
   "keywords": [
-    "rescue161",
+    "saklolo161",
     "emergency-response",
     "marikina",
     "capstone",
     "soa"
   ],
-  "author": "Rescue 161 Capstone Team",
+  "author": "Saklolo 161 Capstone Team",
   "license": "ISC",
   "engines": {
     "node": ">=20"
