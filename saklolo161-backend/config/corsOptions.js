@@ -17,7 +17,12 @@ const allowedOrigins = [
   'http://localhost:19006',  // React Native / Expo web preview
   'http://localhost:8081',   // React Native Metro bundler
   'exp://127.0.0.1:19000',   // Expo Go app
+  'https://saklolo161-web.vercel.app',            // production web dashboard
+  'https://saklolo161-web-git-main-jdchp.vercel.app', // preview web dashboard
 ];
+
+const isVercelPreview = (origin) =>
+  /^https:\/\/([a-z0-9-]+\.)?(saklolo161-web|saklolo161-[a-z0-9-]+)\.vercel\.app$/.test(origin);
 
 const corsOptions = {
   origin: (origin, callback) => {
@@ -27,9 +32,14 @@ const corsOptions = {
     // 2. Allow local network IPs during testing (e.g. 192.168.x.x or 10.x.x.x)
     const isLocalNetwork = /^http:\/\/(192\.168\.\d+\.\d+|10\.\d+\.\d+\.\d+|172\.(1[6-9]|2\d|3[0-1])\.\d+\.\d+)(:\d+)?$/.test(origin);
 
-    // 3. Allow explicitly listed origins or local network IPs
-    if (allowedOrigins.includes(origin) || isLocalNetwork || process.env.NODE_ENV !== 'production') {
-           callback(null, true);
+    // 3. Allow explicitly listed origins, Vercel deployments, or local network IPs
+    if (
+      allowedOrigins.includes(origin) ||
+      isVercelPreview(origin) ||
+      isLocalNetwork ||
+      process.env.NODE_ENV !== 'production'
+    ) {
+      callback(null, true);
     } else {
       console.warn(`⚠️  CORS blocked request from origin: ${origin}`);
       callback(new Error('Not allowed by CORS'));
