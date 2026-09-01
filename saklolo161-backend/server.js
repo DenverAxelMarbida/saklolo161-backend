@@ -22,6 +22,7 @@ const { notFoundHandler, errorHandler } = require('./middlewares/errorHandler');
 
 const incidentRoutes = require('./routes/incidentRoutes');
 const weatherRoutes = require('./routes/weatherRoutes');
+const authRoutes = require('./routes/authRoutes');
 
 const app = express();
 
@@ -45,6 +46,7 @@ app.get('/', (req, res) => {
 // ---- API Routes ------------------------------------------------------------
 app.use('/api/incidents', incidentRoutes);
 app.use('/api/weather-river', weatherRoutes);
+app.use('/api/auth', authRoutes);
 
 // ---- 404 + Error Handlers (must be registered LAST) -----------------------
 app.use(notFoundHandler);

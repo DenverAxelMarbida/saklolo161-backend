@@ -75,6 +75,17 @@ async function dispatchIncident(req, res, next) {
       });
     }
 
+    // ---- 3b. Agency authorization check (verifyAuth set req.user) ----
+    if (
+      req.user.agency !== 'ALL' &&
+      req.user.agency.toLowerCase() !== incident.category.toLowerCase()
+    ) {
+      return res.status(403).json({
+        success: false,
+        message: 'Your agency is not authorized to dispatch this incident.',
+      });
+    }
+
     // ---- 4. Confirm the unit belongs to that station ----
     if (!station.assignedUnits.includes(assignedUnit)) {
       return res.status(400).json({

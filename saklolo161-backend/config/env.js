@@ -39,4 +39,10 @@ module.exports = {
   RIVER_COMMAND_PHONE: process.env.RIVER_COMMAND_PHONE || '+639170000005',
   PNP_MAIN_HQ_PHONE: process.env.PNP_MAIN_HQ_PHONE || '+639170000006',
   PNP_SUBSTATION_PHONE: process.env.PNP_SUBSTATION_PHONE || '+639170000007',
+
+  // JWT signing secret (Phase 2: staff auth).
+  // Fallback below is a LOCAL-DEV PLACEHOLDER ONLY — set a strong,
+  // real JWT_SECRET via Render env vars in production, never commit
+  // a production secret here.
+  JWT_SECRET: process.env.JWT_SECRET || 'saklolo161-local-dev-secret-change-me',
 };

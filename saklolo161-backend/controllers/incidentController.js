@@ -73,16 +73,27 @@ async function createIncident(req, res, next) {
 
 /**
  * GET /api/incidents
- * Returns all incidents. In Phase 2, this will support query
- * params for filtering by status/category/barangay.
+ * Returns all incidents for admins (agency "ALL"). For agency-scoped
+ * dispatchers, returns only incidents whose category matches their
+ * agency (case-insensitive). Requires verifyAuth (sets req.user).
  */
 function getIncidents(req, res, next) {
   try {
     const incidents = mockIncidents.getAll();
+
+    const { agency } = req.user;
+
+    const filtered =
+      agency === 'ALL'
+        ? incidents
+        : incidents.filter(
+            (incident) => incident.category.toLowerCase() === agency.toLowerCase()
+          );
+
     return res.status(200).json({
       success: true,
-      count: incidents.length,
-      data: incidents,
+      count: filtered.length,
+      data: filtered,
     });
   } catch (error) {
     next(error);

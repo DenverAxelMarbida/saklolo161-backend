@@ -18,20 +18,22 @@ const {
 const { dispatchIncident } = require('../controllers/dispatchController');
 
 const validateIncident = require('../middlewares/validateIncident');
+const verifyAuth = require('../middlewares/verifyAuth');
+const incidentRateLimiter = require('../middlewares/rateLimitIncidents');
 
-// POST /api/incidents - create a new incident report
-router.post('/', validateIncident, createIncident);
+// POST /api/incidents - create a new incident report (public: mobile entry point)
+router.post('/', incidentRateLimiter, validateIncident, createIncident);
 
-// POST /api/incidents/dispatch - assign a station + unit to an incident
-router.post('/dispatch', dispatchIncident);
+// POST /api/incidents/dispatch - assign a station + unit to an incident (dispatcher JWT)
+router.post('/dispatch', verifyAuth, dispatchIncident);
 
-// GET /api/incidents - list all incidents (mock: 5 seeded records)
-router.get('/', getIncidents);
+// GET /api/incidents - list all incidents, agency-filtered (dispatcher JWT)
+router.get('/', verifyAuth, getIncidents);
 
-// GET /api/incidents/:id - get a single incident by ID
+// GET /api/incidents/:id - get a single incident by ID (public: mobile status polling)
 router.get('/:id', getIncidentById);
 
-// PATCH /api/incidents/:id/status - update incident status
-router.patch('/:id/status', updateIncidentStatus);
+// PATCH /api/incidents/:id/status - update incident status (dispatcher JWT)
+router.patch('/:id/status', verifyAuth, updateIncidentStatus);
 
 module.exports = router;
