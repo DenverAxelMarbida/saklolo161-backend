@@ -12,6 +12,6 @@ const router = express.Router();
 const { login } = require('../controllers/authController');
 
 // POST /api/auth/login - authenticate staff (dispatcher/admin) and issue a JWT
-router.post('/', login);
+router.post('/login', login);
 
 module.exports = router;
