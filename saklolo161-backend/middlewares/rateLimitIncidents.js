@@ -10,7 +10,7 @@
  * --------------------------------------------------------------
  */
 
-const rateLimit = require('express-rate-limit');
+const { rateLimit, ipKeyGenerator } = require('express-rate-limit');
 
 // eslint-disable-next-line no-unused-vars
 const incidentRateLimiter = rateLimit({
@@ -28,7 +28,7 @@ const incidentRateLimiter = rateLimit({
     if (phone && typeof phone === 'string' && phone.trim()) {
       return `phone:${phone.trim()}`;
     }
-    return `ip:${req.ip}`;
+    return ipKeyGenerator(req);
   },
 
   handler: (req, res) => {

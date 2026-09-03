@@ -23,3 +23,27 @@ jobs:
       - name: Install Dependencies
         working-directory: ./saklolo161-backend
         run: npm ci
+
+      - name: Structure guard
+        working-directory: .
+        run: |
+          test -f saklolo161-backend/server.js
+          test -f saklolo161-backend/package.json
+          test -f saklolo161-backend/routes/authRoutes.js
+          test -f saklolo161-backend/middlewares/rateLimitIncidents.js
+          test ! -f server.js
+          test ! -f package.json
+
+      - name: Boot and auth smoke test
+        working-directory: ./saklolo161-backend
+        run: |
+          PORT=5999 node server.js & SERVER_PID=$!
+          sleep 3
+          curl -fsS http://localhost:5999/ > /dev/null
+          TOKEN=$(curl -s -X POST http://localhost:5999/api/auth/login \
+            -H 'Content-Type: application/json' \
+            -d '{"email":"admin@marikina.gov.ph","password":"changeme123"}' \
+            | node -pe "JSON.parse(require('fs').readFileSync(0)).data.token")
+          test -n "$TOKEN"
+          curl -fsS -H "Authorization: Bearer $TOKEN" http://localhost:5999/api/incidents > /dev/null
+          kill $SERVER_PID
