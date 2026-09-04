@@ -150,6 +150,10 @@ async function updateIncidentStatus(req, res, next) {
 
     const updated = mockIncidents.updateStatus(id, status);
 
+    if (status === 'Resolved') {
+      updated.resolvedAt = new Date().toISOString();
+    }
+
     // Notify the citizen of the status change (mocked in Phase 1).
     await semaphoreService.sendSms(
       updated.citizenPhone,
