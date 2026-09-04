@@ -14,6 +14,17 @@ const semaphoreService = require('../services/semaphoreService');
 const VALID_STATUSES = ['Pending', 'Dispatched', 'En Route', 'Resolved'];
 
 /**
+ * Derives minutes elapsed since the incident was reported. The web
+ * dashboard shows "Xm ago" from this value. Falls back to 0 when a
+ * timestamp is missing or malformed so the UI never shows NaN.
+ */
+function deriveElapsedMinutes(timestamp) {
+  const ts = timestamp ? new Date(timestamp).getTime() : NaN;
+  if (!Number.isFinite(ts)) return 0;
+  return Math.max(0, Math.floor((Date.now() - ts) / 60000));
+}
+
+/**
  * Generates a mock incidentId in the format INC-YYYYMMDD-XXXX
  */
 function generateIncidentId() {
@@ -64,7 +75,10 @@ async function createIncident(req, res, next) {
     return res.status(201).json({
       success: true,
       message: 'Incident created successfully.',
-      data: newIncident,
+      data: {
+        ...newIncident,
+        elapsedMinutes: deriveElapsedMinutes(newIncident.timestamp),
+      },
     });
   } catch (error) {
     next(error);
@@ -93,7 +107,10 @@ function getIncidents(req, res, next) {
     return res.status(200).json({
       success: true,
       count: filtered.length,
-      data: filtered,
+      data: filtered.map((incident) => ({
+        ...incident,
+        elapsedMinutes: deriveElapsedMinutes(incident.timestamp),
+      })),
     });
   } catch (error) {
     next(error);
@@ -116,7 +133,13 @@ function getIncidentById(req, res, next) {
       });
     }
 
-    return res.status(200).json({ success: true, data: incident });
+    return res.status(200).json({
+      success: true,
+      data: {
+        ...incident,
+        elapsedMinutes: deriveElapsedMinutes(incident.timestamp),
+      },
+    });
   } catch (error) {
     next(error);
   }
@@ -163,7 +186,10 @@ async function updateIncidentStatus(req, res, next) {
     return res.status(200).json({
       success: true,
       message: `Incident ${id} status updated to "${status}".`,
-      data: updated,
+      data: {
+        ...updated,
+        elapsedMinutes: deriveElapsedMinutes(updated.timestamp),
+      },
     });
   } catch (error) {
     next(error);
