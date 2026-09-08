@@ -8,15 +8,15 @@ dashboard consume.
 ## This Repo
 
 Express.js REST API, deployed on Render (no Docker — Render handles
-PaaS containerization). CI via GitHub Actions (`npm ci` on push/PR to
-`main`).
+PaaS containerization). CI via GitHub Actions (`npm ci` → lint → test
+on push/PR to `main`; contract tests land in Phase 3 task 6).
 
 ## Related Repos (context only — don't assume their contents)
 
 | Repo | Stack | Relationship to this repo |
 |---|---|---|
-| `saklolo161-mobile` | Expo React Native | Citizen-facing, unauthenticated. Calls only `POST /api/incidents` and `GET /api/incidents/:id`. |
-| `saklolo161-web` | React 19 + Vite + Tailwind | Dispatcher-facing, authenticated. Calls `GET /api/incidents`, `POST /api/incidents/dispatch`, `PATCH /api/incidents/:id/status`, `POST /api/auth/login`. |
+| `saklolo161-mobile` | Expo React Native | Citizen-facing, unauthenticated. Calls `POST /api/incidents`, `GET /api/incidents/:id`, plus Phase 3 `GET /api/routes` and `POST /api/incidents/:id/evidence`. |
+| `saklolo161-web` | React 19 + Vite + Tailwind | Dispatcher-facing, authenticated. Calls `GET /api/incidents`, `POST /api/incidents/dispatch`, `PATCH /api/incidents/:id/status`, `GET /api/routes`. (`POST /api/auth/login` is removed in the Phase 3 Firebase cutover.) |
 
 If a task needs you to reason about mobile or web internals, ask for
 those files rather than assuming — this repo has been reviewed, they
@@ -28,25 +28,31 @@ haven't necessarily been in every session.
   endpoints: `GET /api/weather-river` (10-min cache), `GET /api/incidents`,
   `POST /api/incidents`, `POST /api/incidents/dispatch`,
   `PATCH /api/incidents/:id/status`.
-- **Phase 2 (in progress):** Staff auth (JWT-based, decoupled from
-  Firebase — see `services/authService.js` once built), agency-scoped
-  authorization, rate limiting on the public incident-creation endpoint.
-  Full step-by-step task list: `saklolo161-backend-phase2-tasks.md`.
-- **Phase 3 (next):** Firebase Realtime Database (`asia-southeast1`)
-  replaces the in-memory mock stores; Firebase Auth replaces the JWT
-  layer; Semaphore SMS goes live. See "Phase 3 migration path" below.
+- **Phase 2 (done):** Staff auth (JWT, decoupled from Firebase via
+  `services/authService.js`), agency-scoped authorization, per-phone
+  rate limiting, `elapsedMinutes` — merged and live.
+- **Phase 3 (in progress):**
+  - Incident service layer, real PAGASA river feed, real routing
+    (`GET /api/routes`), evidence upload, contract tests, then the
+    Firebase cutover (RTDB + Auth + Semaphore) as a coordinated window.
+  - Task list: `../Phase 3/saklolo161-backend-phase3-tasks.md`
+  - Frozen contract to build against: `../Phase 3/saklolo161-phase3-contracts.md`
+  - Auth cutover checklist: `../Phase 3/saklolo161-auth-coordination.md`
+  See "Phase 3 migration path" below.
 
 ## API Contract
 
-| Endpoint | Auth (once Phase 2 ships) | Notes |
+| Endpoint | Auth | Notes |
 |---|---|---|
 | `POST /api/incidents` | None — must stay public | Mobile's entry point. Rate-limited per `citizenPhone`. |
 | `GET /api/incidents/:id` | None — must stay public | Mobile's status-polling endpoint. **Never move this behind auth** — mobile has no login and never will in this architecture. |
-| `GET /api/incidents` | Dispatcher JWT required | Full list, agency-filtered server-side (`req.user.agency`). Web dashboard only. |
-| `POST /api/incidents/dispatch` | Dispatcher JWT required | Agency-scoped: a FIRE-agency token can't dispatch a MEDICAL incident. |
-| `PATCH /api/incidents/:id/status` | Dispatcher JWT required | Accepts any of `Pending/Dispatched/En Route/Resolved`. Generic — no per-status special-casing needed. |
-| `POST /api/auth/login` | None (this *is* the login) | New in Phase 2. |
-| `GET /api/weather-river` | None | 10-min server-side cache. |
+| `GET /api/incidents` | Dispatcher token required | Full list, agency-filtered server-side (`req.user.agency`). Web dashboard only. |
+| `POST /api/incidents/dispatch` | Dispatcher token required | Agency-scoped: a FIRE-agency token can't dispatch a MEDICAL incident. |
+| `PATCH /api/incidents/:id/status` | Dispatcher token required | Accepts any of `Pending/Dispatched/En Route/Resolved`. Generic — no per-status special-casing needed. |
+| `POST /api/auth/login` | Removed in Phase 3 | Phase 2 JWT login only; replaced by Firebase Auth on the web client in the coordinated cutover. |
+| `GET /api/weather-river` | None | 10-min server-side cache. Gains UI-ignored `source: "pagasa" | "mock"` in Phase 3. |
+| `GET /api/routes` | None — public, rate-limited | Phase 3. Real driving route via Mapbox Directions; straight-line fallback on failure. |
+| `POST /api/incidents/:id/evidence` | None — public, rate-limited | Phase 3. Multipart `file` → Firebase Storage + metadata under `evidence[]`. |
 
 **The line that must never move:** `GET /api/incidents/:id` is public
 and `GET /api/incidents` is not. Mobile depends on that split staying
@@ -131,13 +137,20 @@ half-broken against a mismatched remote instance.
 
 ## Known Gaps
 
-- No current trigger sets an incident to `"En Route"` from any client
-  yet — the endpoint supports it, nothing calls it. (Being added on
-  the web dashboard side as a manual dispatcher action — see
-  `saklolo161-web-phase2-tasks.md` §2.6. No backend change needed.)
+- **Incidents have no service layer yet** — `incidentController.js` and
+  `dispatchController.js` import `data/mockIncidents.js` directly.
+  Phase 3 task 1 adds `services/incidentService.js` (getDb() branch) so
+  the Firebase store swap stays a contained change. This is the biggest
+  remaining seam.
+- River level in `GET /api/weather-river` is hardcoded mock until the
+  PAGASA feed ships (Phase 3 task 2).
+- No test suite — Phase 3 task 6 adds contract tests wired into CI.
 - `dispatchController.js`'s station/incident category match is a
   direct string comparison after normalization — confirm case handling
   stays consistent if new categories are ever added.
+- The web dashboard's `"Mark En Route"` action (Phase 2 §2.6) is now the
+  only trigger for `"En Route"`; no GPS/telemetry detection exists yet
+  (held — needs a responder client to generate telemetry).
 
 ## Phase 3 Migration Path
 
@@ -152,6 +165,8 @@ half-broken against a mismatched remote instance.
 Uncomment the real `admin.initializeApp(...)` block in
 `config/firebase.js` once, for both the database and auth surfaces
 together — they share one SDK bootstrap. See
-`saklolo161-auth-implementation-plan-v2.md` for the full cutover
+`../Phase 3/saklolo161-auth-coordination.md` for the full cutover
 checklist (re-provisioning accounts, the scheduled forced re-login,
-what to verify before/after) before running this migration.
+what to verify before/after) before running this migration — it is a
+scheduled window paired with the web dev's `auth.js` swap, never a
+silent deploy.
