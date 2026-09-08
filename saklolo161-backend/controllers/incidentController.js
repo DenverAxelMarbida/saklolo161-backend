@@ -2,12 +2,12 @@
  * controllers/incidentController.js
  * --------------------------------------------------------------
  * Handles the business logic for incident-related requests.
- * Talks to /data/mockIncidents.js (Phase 1) and /services (Mapbox,
- * Semaphore) — routes stay thin and just point here.
+ * Talks to /services/incidentService.js (Phase 2) and /services
+ * (Mapbox, Semaphore) — routes stay thin and just point here.
  * --------------------------------------------------------------
  */
 
-const mockIncidents = require('../data/mockIncidents');
+const incidentService = require('../services/incidentService');
 const mapboxService = require('../services/mapboxService');
 const semaphoreService = require('../services/semaphoreService');
 
@@ -64,7 +64,7 @@ async function createIncident(req, res, next) {
       timestamp: new Date().toISOString(),
     };
 
-    mockIncidents.add(newIncident);
+    await incidentService.add(newIncident);
 
     // Fire-and-forget confirmation SMS to the citizen (mocked in Phase 1).
     semaphoreService.sendSms(
@@ -91,9 +91,9 @@ async function createIncident(req, res, next) {
  * dispatchers, returns only incidents whose category matches their
  * agency (case-insensitive). Requires verifyAuth (sets req.user).
  */
-function getIncidents(req, res, next) {
+async function getIncidents(req, res, next) {
   try {
-    const incidents = mockIncidents.getAll();
+    const incidents = await incidentService.getAll();
 
     const { agency } = req.user;
 
@@ -121,10 +121,10 @@ function getIncidents(req, res, next) {
  * GET /api/incidents/:id
  * Returns a single incident by ID. Useful for detail screens.
  */
-function getIncidentById(req, res, next) {
+async function getIncidentById(req, res, next) {
   try {
     const { id } = req.params;
-    const incident = mockIncidents.findById(id);
+    const incident = await incidentService.findById(id);
 
     if (!incident) {
       return res.status(404).json({
@@ -163,7 +163,7 @@ async function updateIncidentStatus(req, res, next) {
       });
     }
 
-    const incident = mockIncidents.findById(id);
+    const incident = await incidentService.findById(id);
     if (!incident) {
       return res.status(404).json({
         success: false,
@@ -171,7 +171,7 @@ async function updateIncidentStatus(req, res, next) {
       });
     }
 
-    const updated = mockIncidents.updateStatus(id, status);
+    const updated = await incidentService.updateStatus(id, status);
 
     if (status === 'Resolved') {
       updated.resolvedAt = new Date().toISOString();

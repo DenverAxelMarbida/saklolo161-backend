@@ -7,6 +7,7 @@
  */
 
 const express = require('express');
+const multer = require('multer');
 const router = express.Router();
 
 const {
@@ -16,10 +17,18 @@ const {
   updateIncidentStatus,
 } = require('../controllers/incidentController');
 const { dispatchIncident } = require('../controllers/dispatchController');
+const { addEvidence } = require('../controllers/evidenceController');
 
 const validateIncident = require('../middlewares/validateIncident');
 const verifyAuth = require('../middlewares/verifyAuth');
 const incidentRateLimiter = require('../middlewares/rateLimitIncidents');
+const { evidenceRateLimiter } = require('../middlewares/rateLimitPublic');
+
+// Evidence uploads: in-memory only (no disk), max 10 MB, one file.
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024, files: 1 },
+});
 
 // POST /api/incidents - create a new incident report (public: mobile entry point)
 router.post('/', incidentRateLimiter, validateIncident, createIncident);
@@ -32,6 +41,9 @@ router.get('/', verifyAuth, getIncidents);
 
 // GET /api/incidents/:id - get a single incident by ID (public: mobile status polling)
 router.get('/:id', getIncidentById);
+
+// POST /api/incidents/:id/evidence - attach a photo/file to an incident (public, IP rate-limited)
+router.post('/:id/evidence', evidenceRateLimiter, upload.single('file'), addEvidence);
 
 // PATCH /api/incidents/:id/status - update incident status (dispatcher JWT)
 router.patch('/:id/status', verifyAuth, updateIncidentStatus);

@@ -8,6 +8,8 @@
  * --------------------------------------------------------------
  */
 
+const multer = require('multer');
+
 function notFoundHandler(req, res, next) {
   res.status(404).json({
     success: false,
@@ -18,6 +20,16 @@ function notFoundHandler(req, res, next) {
 // eslint-disable-next-line no-unused-vars
 function errorHandler(err, req, res, next) {
   console.error('🔥 Unhandled error:', err.stack || err.message);
+
+  // Multer upload errors surface as plain errors — map the common
+  // ones to a client-friendly 400 instead of a 500.
+  if (err instanceof multer.MulterError) {
+    const message =
+      err.code === 'LIMIT_FILE_SIZE'
+        ? 'File exceeds the 10 MB upload limit.'
+        : `Upload failed: ${err.message}`;
+    return res.status(400).json({ success: false, message });
+  }
 
   const statusCode = err.statusCode || 500;
   res.status(statusCode).json({
