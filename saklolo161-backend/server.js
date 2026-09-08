@@ -23,6 +23,7 @@ const { notFoundHandler, errorHandler } = require('./middlewares/errorHandler');
 const incidentRoutes = require('./routes/incidentRoutes');
 const weatherRoutes = require('./routes/weatherRoutes');
 const authRoutes = require('./routes/authRoutes');
+const routingRoutes = require('./routes/routingRoutes');
 
 const app = express();
 
@@ -47,16 +48,23 @@ app.get('/', (req, res) => {
 app.use('/api/incidents', incidentRoutes);
 app.use('/api/weather-river', weatherRoutes);
 app.use('/api/auth', authRoutes);
+app.use('/api/routes', routingRoutes);
 
 // ---- 404 + Error Handlers (must be registered LAST) -----------------------
 app.use(notFoundHandler);
 app.use(errorHandler);
 
 // ---- Start Server -----------------------------------------------------------
-app.listen(PORT, () => {
-  console.log('--------------------------------------------------');
-  console.log(`🚨  Saklolo 161 Middleware Gateway`);
-  console.log(`🌐  Running at: http://localhost:${PORT}`);
-  console.log(`🛠️   Environment: ${NODE_ENV}`);
-  console.log('--------------------------------------------------');
-});
+// When imported by tests (supertest), don't bind a port — export `app`
+// so the test runner can drive it in-process.
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log('--------------------------------------------------');
+    console.log(`🚨  Saklolo 161 Middleware Gateway`);
+    console.log(`🌐  Running at: http://localhost:${PORT}`);
+    console.log(`🛠️   Environment: ${NODE_ENV}`);
+    console.log('--------------------------------------------------');
+  });
+}
+
+module.exports = app;

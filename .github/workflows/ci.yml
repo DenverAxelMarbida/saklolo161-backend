@@ -34,6 +34,10 @@ jobs:
           test ! -f server.js
           test ! -f package.json
 
+      - name: Contract tests
+        working-directory: ./saklolo161-backend
+        run: npm test
+
       - name: Boot and auth smoke test
         working-directory: ./saklolo161-backend
         run: |

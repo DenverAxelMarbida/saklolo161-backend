@@ -21,6 +21,14 @@ module.exports = {
   // Mapbox
   MAPBOX_ACCESS_TOKEN: process.env.MAPBOX_ACCESS_TOKEN || '',
 
+  // PAGASA Pasig-Marikina-Tullahan FFWS (Phase 3: live river feed).
+  // Public feed, no API key. Falls back to the in-memory mock on the
+  // server side when the feed is unreachable (see riverService.js).
+  PAGASA_RIVER_ENDPOINT:
+    process.env.PAGASA_RIVER_ENDPOINT ||
+    'https://pasig-marikina-tullahanffws.pagasa.dost.gov.ph/water/table_list.do',
+  PAGASA_RIVER_STATION: process.env.PAGASA_RIVER_STATION || 'Nangka',
+
   // Semaphore SMS
   SEMAPHORE_API_KEY: process.env.SEMAPHORE_API_KEY || '',
   SEMAPHORE_SENDER_NAME: process.env.SEMAPHORE_SENDER_NAME || 'SAKLOLO161',

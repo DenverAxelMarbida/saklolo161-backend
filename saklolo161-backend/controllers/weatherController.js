@@ -6,22 +6,18 @@
  *
  * PHASE 1: Returns a mock snapshot so mobile devs can build the
  * UI immediately, without waiting on a live weather/river API key.
- * PHASE 2: Replace mockWeatherRiver below with a real service call
- * (e.g. PAGASA/OpenWeatherMap for weather, MMDA/DOST Project NOAH
- * or a Marikina LGU feed for river level), following the same
- * pattern mapboxService.js and semaphoreService.js already use.
+ * PHASE 3: River level now comes from the live PAGASA feed through
+ * services/riverService.js. When the feed is unreachable the
+ * service degrades back to mock values internally — the response
+ * shape never changes, only `source` ("pagasa" | "mock") tells the
+ * caller which one is in effect.
  * --------------------------------------------------------------
  */
-
-/**
- * Mock snapshot of current weather + Marikina River conditions.
- * Shaped to match exactly what Screen 1 expects to render.
- */
-
 
 const axios = require('axios');
 const NodeCache = require('node-cache');
 const { OPENWEATHER_API_KEY } = require('../config/env');
+const { getRiverStatus } = require('../services/riverService');
 
 // Cache data for 10 minutes (600 seconds)
 const weatherCache = new NodeCache({ stdTTL: 600 });
@@ -62,16 +58,21 @@ async function getWeatherRiver(req, res, next) {
       }
     }
 
+    // 3. River level goes through riverService (never throws) —
+    //    `null` means the PAGASA feed degraded, so mock values below.
+    const river = await getRiverStatus();
+
     const responsePayload = {
       temperature: liveTemp,
       condition: liveCondition,
       humidity: liveHumidity,
       wind: liveWind,
-      riverLevelMeters: 15.2,
-      riverStatus: 'Normal',
-      alertLevel: 'Alert Level 1 begins at 15m',
-      riskLevel: 'LOW RISK',
+      riverLevelMeters: river ? river.riverLevelMeters : 15.2,
+      riverStatus: river ? river.riverStatus : 'Normal',
+      alertLevel: river ? river.alertLevel : 'Alert Level 1 begins at 15m',
+      riskLevel: river ? river.riskLevel : 'LOW RISK',
       timestamp: new Date().toISOString(),
+      source: river ? river.source : 'mock',
     };
 
     // 3. Save payload to cache

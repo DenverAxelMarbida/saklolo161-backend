@@ -10,7 +10,7 @@
  * --------------------------------------------------------------
  */
 
-const mockIncidents = require('../data/mockIncidents');
+const incidentService = require('../services/incidentService');
 const stationService = require('../services/stationService');
 const semaphoreService = require('../services/semaphoreService');
 
@@ -46,7 +46,7 @@ async function dispatchIncident(req, res, next) {
     }
 
     // ---- 2. Look up the incident ----
-    const incident = mockIncidents.findById(incidentId);
+    const incident = await incidentService.findById(incidentId);
     if (!incident) {
       return res.status(404).json({
         success: false,
@@ -96,13 +96,20 @@ async function dispatchIncident(req, res, next) {
     }
 
     // ---- 5. Update the incident record ----
-    const updated = mockIncidents.updateStatus(incidentId, 'Dispatched');
+    const updated = await incidentService.updateStatus(incidentId, 'Dispatched');
     updated.dispatch = {
       stationId: station.id,
       stationName: station.name,
       assignedUnit,
       estimatedTurnout: station.estimatedTurnout,
       dispatchedAt: new Date().toISOString(),
+    };
+    // Contract anchor: the responding station is exposed at the TOP
+    // level (`incident.station.coords`), not nested under dispatch.
+    updated.station = {
+      id: station.id,
+      name: station.name,
+      coords: station.coords || null,
     };
 
     // ---- 6. Notify station + citizen (mocked via semaphoreService in Phase 1/2) ----
