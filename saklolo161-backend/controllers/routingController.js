@@ -34,11 +34,12 @@ async function getRoute(req, res, next) {
       }
     }
 
-    const inRange = (v, lo, hi) => !Number.isNaN(v) && v >= lo && v <= hi;
-    if (!inRange(coords.fromLat, -90, 90) || !inRange(coords.toLat, -90, 90)) {
+    const outOfRange = (v) => !Number.isNaN(v) && (v < -90 || v > 90);
+    const outOfRangeLng = (v) => !Number.isNaN(v) && (v < -180 || v > 180);
+    if (outOfRange(coords.fromLat) || outOfRange(coords.toLat)) {
       errors.push('latitudes must be between -90 and 90.');
     }
-    if (!inRange(coords.fromLng, -180, 180) || !inRange(coords.toLng, -180, 180)) {
+    if (outOfRangeLng(coords.fromLng) || outOfRangeLng(coords.toLng)) {
       errors.push('longitudes must be between -180 and 180.');
     }
 

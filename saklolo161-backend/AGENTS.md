@@ -8,8 +8,8 @@ dashboard consume.
 ## This Repo
 
 Express.js REST API, deployed on Render (no Docker — Render handles
-PaaS containerization). CI via GitHub Actions (`npm ci` → lint → test
-on push/PR to `main`; contract tests land in Phase 3 task 6).
+PaaS containerization). CI via GitHub Actions (`npm ci` → lint →
+`npm test` contract suite on push/PR to `main`).
 
 ## Related Repos (context only — don't assume their contents)
 
@@ -31,10 +31,13 @@ haven't necessarily been in every session.
 - **Phase 2 (done):** Staff auth (JWT, decoupled from Firebase via
   `services/authService.js`), agency-scoped authorization, per-phone
   rate limiting, `elapsedMinutes` — merged and live.
-- **Phase 3 (in progress):**
-  - Incident service layer, real PAGASA river feed, real routing
-    (`GET /api/routes`), evidence upload, contract tests, then the
-    Firebase cutover (RTDB + Auth + Semaphore) as a coordinated window.
+- **Phase 3 (in progress):** Done and **live on Render** (verified
+  2026-09-08): incident service layer (`services/incidentService.js`),
+  real PAGASA river feed (pinned TLS, `source: "pagasa"|"mock"`),
+  real routing (`GET /api/routes` + Mapbox), evidence upload
+  (`POST /api/incidents/:id/evidence`), and the 15-case contract test
+  suite wired into CI. **Held as a coordinated window:** the Firebase
+  cutover (RTDB + Auth) and Semaphore-led inter-agency sends (task 5).
   - Task list: `../Phase 3/saklolo161-backend-phase3-tasks.md`
   - Frozen contract to build against: `../Phase 3/saklolo161-phase3-contracts.md`
   - Auth cutover checklist: `../Phase 3/saklolo161-auth-coordination.md`
@@ -51,8 +54,13 @@ haven't necessarily been in every session.
 | `PATCH /api/incidents/:id/status` | Dispatcher token required | Accepts any of `Pending/Dispatched/En Route/Resolved`. Generic — no per-status special-casing needed. |
 | `POST /api/auth/login` | Removed in Phase 3 | Phase 2 JWT login only; replaced by Firebase Auth on the web client in the coordinated cutover. |
 | `GET /api/weather-river` | None | 10-min server-side cache. Gains UI-ignored `source: "pagasa" | "mock"` in Phase 3. |
-| `GET /api/routes` | None — public, rate-limited | Phase 3. Real driving route via Mapbox Directions; straight-line fallback on failure. |
-| `POST /api/incidents/:id/evidence` | None — public, rate-limited | Phase 3. Multipart `file` → Firebase Storage + metadata under `evidence[]`. |
+| `GET /api/routes` | None — public, rate-limited | Phase 3 (live). Real driving route via Mapbox Directions; straight-line fallback on failure. |
+| `POST /api/incidents/:id/evidence` | None — public, rate-limited | Phase 3 (live). Multipart `file` → `{fileId, url, mimeType, sizeKb, uploadedAt}`; `url` is `""` until the Firebase Storage cutover. |
+
+**Dispatched incidents expose the responding station at the TOP level:**
+`station: { id, name, coords: { lat, lng } }` — not nested under
+`dispatch`. `dispatch` still carries `stationId`, `assignment`, and the
+SMS payload fields. `evidence: []` is always present (empty when none).
 
 **The line that must never move:** `GET /api/incidents/:id` is public
 and `GET /api/incidents` is not. Mobile depends on that split staying
@@ -77,6 +85,22 @@ handler without preserving the auth boundary.
    built) resets on server restart.** This is a known, accepted Phase 2
    trade-off — don't "fix" it by adding persistence ahead of the Phase
    3 Firebase migration.
+
+## STOP and Ask (phase-3 coordination)
+
+Manual actions that mutate the shared infrastructure or need lead-only
+secrets are **STOP and ask** moments — never do them silently:
+
+- Setting/rotating env on Render (`MAPBOX_ACCESS_TOKEN`,
+  `OPENWEATHER_API_KEY`, `JWT_SECRET`, and the held `FIREBASE_*`,
+  `FIREBASE_DATABASE_URL`, `FIREBASE_CREDENTIALS`, `SEMAPHORE_API_KEY`).
+- Enabling Firebase/Semaphore (Task 5 window only).
+- Restarting or redeploying the shared Render instance mid-iteration.
+
+**Lead-only secrets** (never request from another dev): Render env,
+Firebase service-account JSON + RTDB URL + Storage rules, Semaphore
+account + API key. Any dev may set locally: `PAGASA_RIVER_ENDPOINT`,
+`PAGASA_RIVER_STATION`, a throwaway `MAPBOX_ACCESS_TOKEN`.
 
 ## Established Patterns
 
@@ -137,20 +161,22 @@ half-broken against a mismatched remote instance.
 
 ## Known Gaps
 
-- **Incidents have no service layer yet** — `incidentController.js` and
-  `dispatchController.js` import `data/mockIncidents.js` directly.
-  Phase 3 task 1 adds `services/incidentService.js` (getDb() branch) so
-  the Firebase store swap stays a contained change. This is the biggest
-  remaining seam.
-- River level in `GET /api/weather-river` is hardcoded mock until the
-  PAGASA feed ships (Phase 3 task 2).
-- No test suite — Phase 3 task 6 adds contract tests wired into CI.
+- **Evidence `url` is `""` until the Firebase Storage cutover** —
+  uploads store real metadata (`fileId`, `mimeType`, `sizeKb`) in memory
+  but the URL field is a placeholder. Clients must treat a truthy `url`
+  as optional; don't force-render it.
+- **The PAGASA feed TLS pin** (`config/pagasa-ca.pem`) could break if
+  DOST-PAGASA rotates its certificate chain — regenerate it with
+  `node scripts/refresh-pagasa-ca.js` when `source` flips to `mock`.
 - `dispatchController.js`'s station/incident category match is a
   direct string comparison after normalization — confirm case handling
   stays consistent if new categories are ever added.
 - The web dashboard's `"Mark En Route"` action (Phase 2 §2.6) is now the
   only trigger for `"En Route"`; no GPS/telemetry detection exists yet
   (held — needs a responder client to generate telemetry).
+- Task 5 (Firebase RTDB + Auth + Semaphore) is deliberately NOT shipped —
+  it is a coordinated window with the web `auth.js` swap. `authService.js`
+  still issues JWTs against `data/mockUsers.js`.
 
 ## Phase 3 Migration Path
 

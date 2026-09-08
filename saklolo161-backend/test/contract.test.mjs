@@ -67,11 +67,23 @@ describe('GET /api/weather-river', () => {
 });
 
 describe('GET /api/routes', () => {
-  it('validates the four numeric params', async () => {
+  it('validates the four numeric params (no spurious range errors on missing params)', async () => {
     const res = await request(app).get('/api/routes').query({ fromLat: 'abc' });
     expect(res.status).toBe(400);
     expect(res.body.success).toBe(false);
     expect(Array.isArray(res.body.errors)).toBe(true);
+    expect(res.body.errors.some((e) => e.includes('valid number'))).toBe(true);
+    expect(res.body.errors.some((e) => e.includes('between'))).toBe(false);
+  });
+
+  it('reports range errors only for out-of-range numeric values', async () => {
+    const res = await request(app)
+      .get('/api/routes')
+      .query({ fromLat: 95, fromLng: 121.093, toLat: 14.643, toLng: -200 });
+    expect(res.status).toBe(400);
+    expect(res.body.errors).toContain('latitudes must be between -90 and 90.');
+    expect(res.body.errors).toContain('longitudes must be between -180 and 180.');
+    expect(res.body.errors.some((e) => e.includes('valid number'))).toBe(false);
   });
 
   it('returns the contract-shaped straight-line fallback (Mapbox blanked in suite)', async () => {
