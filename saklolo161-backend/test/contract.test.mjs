@@ -114,6 +114,86 @@ describe('POST /api/incidents', () => {
     expect(res.body.data.incidentId).toBeTruthy();
     expect(res.body.data.evidence).toEqual([]);
   });
+
+  it('defaults the additive evidence-progress fields off', async () => {
+    const res = await request(app)
+      .post('/api/incidents')
+      .send({ ...makeIncident(), citizenPhone: '+639121987655' });
+    expect(res.status).toBe(201);
+    expect(res.body.data.evidenceUploading).toBe(false);
+    expect(res.body.data.evidenceExpectedCount).toBe(0);
+    expect(res.body.data.evidenceFailedCount).toBe(0);
+  });
+
+  it('flips evidenceUploading on when the client declares an expected attachment count', async () => {
+    const res = await request(app)
+      .post('/api/incidents')
+      .send({ ...makeIncident(), citizenPhone: '+639121987656', evidenceExpectedCount: 3 });
+    expect(res.status).toBe(201);
+    expect(res.body.data.evidenceExpectedCount).toBe(3);
+    expect(res.body.data.evidenceUploading).toBe(true);
+    expect(res.body.data.evidenceFailedCount).toBe(0);
+  });
+});
+
+describe('POST /api/incidents/:id/evidence-status', () => {
+  let incidentId;
+
+  beforeAll(async () => {
+    const created = await request(app)
+      .post('/api/incidents')
+      .send({ ...makeIncident(), citizenPhone: '+639121987657', evidenceExpectedCount: 2 });
+    incidentId = created.body.data.incidentId;
+  });
+
+  it('clears evidenceUploading and records the failed count when the upload loop finishes', async () => {
+    const res = await request(app)
+      .post(`/api/incidents/${incidentId}/evidence-status`)
+      .send({ evidenceUploading: false, evidenceFailedCount: 1 });
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body.data.evidenceUploading).toBe(false);
+    expect(res.body.data.evidenceFailedCount).toBe(1);
+    expect(res.body.data.evidenceExpectedCount).toBe(2);
+
+    // AND the update must be visible on the public detail endpoint too.
+    const detail = await request(app).get(`/api/incidents/${incidentId}`);
+    expect(detail.status).toBe(200);
+    expect(detail.body.data.evidenceUploading).toBe(false);
+    expect(detail.body.data.evidenceFailedCount).toBe(1);
+  });
+
+  it('400s for an invalid evidenceUploading type', async () => {
+    const res = await request(app)
+      .post(`/api/incidents/${incidentId}/evidence-status`)
+      .send({ evidenceUploading: 'yes' });
+    expect(res.status).toBe(400);
+    expect(res.body.success).toBe(false);
+  });
+
+  it('400s for a negative or non-integer count', async () => {
+    const res = await request(app)
+      .post(`/api/incidents/${incidentId}/evidence-status`)
+      .send({ evidenceFailedCount: -1 });
+    expect(res.status).toBe(400);
+    expect(res.body.success).toBe(false);
+  });
+
+  it('400s when no progress field is provided', async () => {
+    const res = await request(app)
+      .post(`/api/incidents/${incidentId}/evidence-status`)
+      .send({});
+    expect(res.status).toBe(400);
+    expect(res.body.success).toBe(false);
+  });
+
+  it('404s for an unknown incident', async () => {
+    const res = await request(app)
+      .post('/api/incidents/INC-99999999-9999/evidence-status')
+      .send({ evidenceUploading: false });
+    expect(res.status).toBe(404);
+    expect(res.body.success).toBe(false);
+  });
 });
 
 describe('GET /api/incidents (auth boundary)', () => {

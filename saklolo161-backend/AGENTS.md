@@ -56,6 +56,7 @@ haven't necessarily been in every session.
 | `GET /api/weather-river` | None | 10-min server-side cache. Gains UI-ignored `source: "pagasa" | "mock"` in Phase 3. |
 | `GET /api/routes` | None — public, rate-limited | Phase 3 (live). Real driving route via Mapbox Directions; straight-line fallback on failure. |
 | `POST /api/incidents/:id/evidence` | None — public, rate-limited | Phase 3 (live). Multipart `file` → `{fileId, url, mimeType, sizeKb, uploadedAt}`; `url` is `""` until the Firebase Storage cutover. |
+| `POST /api/incidents/:id/evidence-status` | None — public, rate-limited | Additive evidence-progress signal from mobile: `{ evidenceUploading, evidenceExpectedCount, evidenceFailedCount }`. |
 
 **Dispatched incidents expose the responding station at the TOP level:**
 `station: { id, name, coords: { lat, lng } }` — not nested under
