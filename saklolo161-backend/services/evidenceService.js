@@ -4,31 +4,38 @@
  * Evidence upload seam. Controllers never touch multer/buffer/storage
  * details beyond handing this service the processed `file`.
  *
- * PHASE 3 (current): GET /api/incidents/:id/evidence accepts and
- * validates the upload, but file storage is not live yet — `url` is
- * an empty string and the record is metadata-only. Web/mobile must
- * NOT try to render uploaded `url` values until the Firebase Storage
- * cutover (coordinated Phase 3 window) returns real URLs.
+ * PHASE 3 (current): uploads are written to a local `uploads/evidence`
+ * directory (multer diskStorage, see incidentRoutes.js) and served back
+ * by GET /api/incidents/:id/evidence/:fileId/media. `url` is a RELATIVE
+ * path so clients resolve it against their own API base — this works on
+ * a LAN IP for the phone and behind Render's TLS without baking the
+ * request host/protocol into stored data.
  *
  * PHASE 5 (Firebase cutover): implement uploadEvidenceFile() to write
- * req.file.buffer to Firebase Storage and return the real download
- * URL — this file is the only place that changes.
+ * req.file.buffer to Firebase Storage and return the real absolute
+ * download URL — this file is the only place that changes. Clients
+ * already tolerate both (helpers resolve a leading-slash path against
+ * their API base and pass absolute URLs through untouched).
  * --------------------------------------------------------------
  */
 
+const path = require('path');
 const crypto = require('crypto');
+
+// Single source of truth for where evidence bytes live on disk.
+// Multer's diskStorage writes here; the media controller reads here.
+const UPLOAD_DIR = path.join(__dirname, '..', 'uploads', 'evidence');
 
 /**
  * Produces the contract-shaped evidence record for an uploaded file.
- * @param {Object} file multer file: { buffer, originalname, mimetype, size }
+ * @param {Object} file multer file: { path, filename, originalname, mimetype, size }
+ * @param {Object} ctx { incidentId } — used to build the media URL.
  * @returns {Promise<{fileId, url, mimeType, sizeKb, uploadedAt}>}
  */
-async function createEvidenceRecord(file) {
-  const fileId = `ev-${crypto.randomUUID()}`;
+async function createEvidenceRecord(file, ctx) {
+  const fileId = file.filename || `ev-${crypto.randomUUID()}`;
 
-  // Storage is not live until the Firebase cutover — keep metadata
-  // accurate, leave the URL empty rather than inventing a fake one.
-  const url = await uploadEvidenceFile(file);
+  const url = await uploadEvidenceFile(file, { ...ctx, fileId });
 
   return {
     fileId,
@@ -40,14 +47,31 @@ async function createEvidenceRecord(file) {
 }
 
 /**
- * Persists the file bytes and returns a renderable download URL.
- * @param {Object} file multer file
- * @returns {Promise<string>} '' until Firebase Storage is live.
+ * Finds the on-disk path for a stored evidence record.
+ * @param {string} fileId
+ * @returns {string} absolute path (may not exist).
  */
-async function uploadEvidenceFile(file) {
-  // Firebase Storage cutover writes `file.buffer` here and returns
-  // the real download URL.
-  return '';
+function mediaPathFor(fileId) {
+  return path.join(UPLOAD_DIR, fileId);
 }
 
-module.exports = { createEvidenceRecord, uploadEvidenceFile };
+/**
+ * Returns the media URL for a stored record. Relative so any client
+ * (LAN phone, TLS web) resolves it against its own API base.
+ * @param {Object} file multer file
+ * @param {Object} ctx { incidentId, fileId }
+ * @returns {Promise<string>}
+ */
+async function uploadEvidenceFile(file, ctx) {
+  // multer diskStorage already persisted the bytes at file.path (named
+  // by fileId). The Firebase Storage cutover replaces this function body
+  // — writing to Storage and returning the absolute download URL.
+  return `/api/incidents/${ctx.incidentId}/evidence/${ctx.fileId}/media`;
+}
+
+module.exports = {
+  createEvidenceRecord,
+  uploadEvidenceFile,
+  mediaPathFor,
+  UPLOAD_DIR,
+};

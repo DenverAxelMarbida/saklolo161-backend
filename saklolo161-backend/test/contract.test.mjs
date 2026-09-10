@@ -10,6 +10,7 @@
  *   POST /api/incidents               → `evidence: []` in the response
  *   GET  /api/incidents/:id           → public + `evidence[]`
  *   POST /api/incidents/:id/evidence  → record shape, 404, size limit
+ *   GET  /api/incidents/:id/evidence/:fileId/media → 200 stream, 404
  *   POST /api/incidents/dispatch      → top-level `station.coords`
  *   Auth boundary                      → list requires token, :id does not
  * --------------------------------------------------------------
@@ -178,6 +179,7 @@ describe('dispatch → station anchor', () => {
 
 describe('POST /api/incidents/:id/evidence', () => {
   let incidentId;
+  let uploadedFileId;
 
   beforeAll(async () => {
     const created = await request(app).post('/api/incidents').send(makeIncident());
@@ -192,9 +194,13 @@ describe('POST /api/incidents/:id/evidence', () => {
     const d = res.body.data;
     expect(d.fileId).toMatch(/^ev-/);
     expect(typeof d.url).toBe('string');
+    // url is a relative media path so clients resolve it against their
+    // own API base (LAN phone / TLS web) — never a baked host.
+    expect(d.url).toBe(`/api/incidents/${incidentId}/evidence/${d.fileId}/media`);
     expect(typeof d.mimeType).toBe('string');
     expect(typeof d.sizeKb).toBe('number');
     expect(new Date(d.uploadedAt).toString()).not.toBe('Invalid Date');
+    uploadedFileId = d.fileId;
   });
 
   it('appends the evidence to the incident detail', async () => {
@@ -217,11 +223,28 @@ describe('POST /api/incidents/:id/evidence', () => {
     expect(res.status).toBe(404);
   });
 
-  it('400s for files over the 10 MB limit', async () => {
+  it('400s for files over the 200 MB limit', async () => {
     const res = await request(app)
       .post(`/api/incidents/${incidentId}/evidence`)
-      .attach('file', Buffer.alloc(11 * 1024 * 1024), 'big.bin');
+      .attach('file', Buffer.alloc(201 * 1024 * 1024), 'big.bin');
     expect(res.status).toBe(400);
+    expect(res.body.success).toBe(false);
+  });
+
+  it('streams the stored media with the record content type', async () => {
+    const res = await request(app).get(
+      `/api/incidents/${incidentId}/evidence/${uploadedFileId}/media`
+    );
+    expect(res.status).toBe(200);
+    expect(res.headers['content-type']).toContain('image/jpeg');
+    expect(Buffer.isBuffer(res.body) || typeof res.body === 'object').toBe(true);
+  });
+
+  it('404s for an unknown evidence fileId', async () => {
+    const res = await request(app).get(
+      `/api/incidents/${incidentId}/evidence/ev-does-not-exist/media`
+    );
+    expect(res.status).toBe(404);
     expect(res.body.success).toBe(false);
   });
 });

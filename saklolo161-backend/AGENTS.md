@@ -161,10 +161,15 @@ half-broken against a mismatched remote instance.
 
 ## Known Gaps
 
-- **Evidence `url` is `""` until the Firebase Storage cutover** —
-  uploads store real metadata (`fileId`, `mimeType`, `sizeKb`) in memory
-  but the URL field is a placeholder. Clients must treat a truthy `url`
-  as optional; don't force-render it.
+- **Evidence media is served from local disk until the Firebase Storage
+  cutover.** Uploads land in `uploads/evidence/` (gitignored, wiped on
+  redeploy) and are streamed by the public, rate-limited
+  `GET /api/incidents/:id/evidence/:fileId/media` (Range-capable for
+  video seeking). The stored `url` is a **relative** path so clients
+  resolve it against their own API base (LAN phone / TLS web). The
+  Firebase Storage cutover only changes `evidenceService.uploadEvidenceFile()`
+  to return an absolute download URL — clients already treat a
+  leading-slash `url` as relative and an absolute one as-is.
 - **The PAGASA feed TLS pin** (`config/pagasa-ca.pem`) could break if
   DOST-PAGASA rotates its certificate chain — regenerate it with
   `node scripts/refresh-pagasa-ca.js` when `source` flips to `mock`.
