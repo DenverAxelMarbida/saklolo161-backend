@@ -178,6 +178,31 @@ half-broken against a mismatched remote instance.
   it is a coordinated window with the web `auth.js` swap. `authService.js`
   still issues JWTs against `data/mockUsers.js`.
 
+## Post-Phase-3 Backlog (QA hardening — do NOT start until Task 5's window passes)
+
+Recorded from the river-feed QA audit (flood-warning product). All items
+are **additive, client-contract-safe** (`source`-style: new fields clients
+ignore). Revisit after the Firebase/Semaphore cutover window.
+
+1. **`degraded: true` on mock mode** — alongside `source: "mock"` in
+   `GET /api/weather-river` so degradation is machine-visible to ops (a
+   `source` field clients are told to ignore is not enough to monitor).
+2. **Freshness surface** — `timestamp` in the payload is the API's own
+   response time, not the feed's data time; a frozen PAGASA reading still
+   reports `source: "pagasa"` indefinitely. Add `observedAt`/
+   `dataAgeMinutes` OR a soft staleness check (e.g., `wl === wl1h ===
+   wl2h` on repeated fetches → flag stale). This is the one real safety
+   hole for a flood-warning product.
+3. **Unit-test the pure logic** — `toMeters` (`(*)` stripping, null) and
+   `classifyRiver` (exact-threshold edges: obs == alert, == alarm, ==
+   critical; null thresholds) are untested; the contract suite only
+   asserts response shape. Export them and cover the boundaries in CI.
+
+Also relevant to the same backlog (previously noted): a river **trend**
+signal (`rising/steady/falling` from `wl` vs `wl30m/wl1h/wl2h`) is cheap
+to add but only worth it when a client genuinely needs early-warning
+behavior. Slot it behind these three.
+
 ## Phase 3 Migration Path
 
 | Layer | Phase 2 | Phase 3 | Files touched |
