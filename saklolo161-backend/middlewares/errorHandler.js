@@ -26,7 +26,7 @@ function errorHandler(err, req, res, next) {
   if (err instanceof multer.MulterError) {
     const message =
       err.code === 'LIMIT_FILE_SIZE'
-        ? 'File exceeds the 10 MB upload limit.'
+        ? 'File exceeds the 200 MB upload limit.'
         : `Upload failed: ${err.message}`;
     return res.status(400).json({ success: false, message });
   }

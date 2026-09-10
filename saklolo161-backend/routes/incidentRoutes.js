@@ -7,6 +7,7 @@
  */
 
 const express = require('express');
+const fs = require('fs');
 const multer = require('multer');
 const router = express.Router();
 
@@ -17,17 +18,34 @@ const {
   updateIncidentStatus,
 } = require('../controllers/incidentController');
 const { dispatchIncident } = require('../controllers/dispatchController');
-const { addEvidence } = require('../controllers/evidenceController');
+const {
+  addEvidence,
+  getEvidenceMedia,
+} = require('../controllers/evidenceController');
+const { UPLOAD_DIR } = require('../services/evidenceService');
 
 const validateIncident = require('../middlewares/validateIncident');
 const verifyAuth = require('../middlewares/verifyAuth');
 const incidentRateLimiter = require('../middlewares/rateLimitIncidents');
-const { evidenceRateLimiter } = require('../middlewares/rateLimitPublic');
+const {
+  evidenceRateLimiter,
+  mediaRateLimiter,
+} = require('../middlewares/rateLimitPublic');
 
-// Evidence uploads: in-memory only (no disk), max 10 MB, one file.
+// Uploaded evidence lands on disk (uploads/evidence/), named by its
+// fileId so the media endpoint can resolve bytes without a lookup map.
+// The dir is place on disk rather than RAM so multi-hundred-MB videos
+// never blow the process heap; like the mock incident store, it resets
+// when the server is redeployed (uploads/ is gitignored).
+fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+
 const upload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024, files: 1 },
+  storage: multer.diskStorage({
+    destination: UPLOAD_DIR,
+    filename: (req, file, cb) =>
+      cb(null, `ev-${require('crypto').randomUUID()}`),
+  }),
+  limits: { fileSize: 200 * 1024 * 1024, files: 1 },
 });
 
 // POST /api/incidents - create a new incident report (public: mobile entry point)
@@ -44,6 +62,9 @@ router.get('/:id', getIncidentById);
 
 // POST /api/incidents/:id/evidence - attach a photo/file to an incident (public, IP rate-limited)
 router.post('/:id/evidence', evidenceRateLimiter, upload.single('file'), addEvidence);
+
+// GET /api/incidents/:id/evidence/:fileId/media - stream stored evidence bytes (public, rate-limited)
+router.get('/:id/evidence/:fileId/media', mediaRateLimiter, getEvidenceMedia);
 
 // PATCH /api/incidents/:id/status - update incident status (dispatcher JWT)
 router.patch('/:id/status', verifyAuth, updateIncidentStatus);

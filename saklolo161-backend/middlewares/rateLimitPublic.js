@@ -4,6 +4,7 @@
  * Rate limiters for the public Phase 3 endpoints (no auth token):
  *   - GET /api/routes                     → 30 req / 10 min / IP
  *   - POST /api/incidents/:id/evidence    → 10 req / 10 min / IP
+ *   - GET /api/incidents/:id/.../media    → 200 req / 10 min / IP
  *
  * Keyed by client IP (all public endpoints are anonymous). Dropped
  * requests get the standard envelope shape with a 429.
@@ -39,4 +40,17 @@ const evidenceRateLimiter = makePublicRateLimiter({
   message: 'Too many evidence uploads from this address. Please try again later.',
 });
 
-module.exports = { routesRateLimiter, evidenceRateLimiter, makePublicRateLimiter };
+// Video streaming issues several requests (Range/seek), so this is
+// deliberately generous while still bounding a single client.
+const mediaRateLimiter = makePublicRateLimiter({
+  windowMs: 10 * 60 * 1000,
+  max: 200,
+  message: 'Too many media requests from this address. Please try again later.',
+});
+
+module.exports = {
+  routesRateLimiter,
+  evidenceRateLimiter,
+  mediaRateLimiter,
+  makePublicRateLimiter,
+};
