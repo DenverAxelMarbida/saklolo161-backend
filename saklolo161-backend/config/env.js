@@ -38,15 +38,15 @@ module.exports = {
   FIREBASE_DATABASE_URL: process.env.FIREBASE_DATABASE_URL || '',
 
   // Station duty phones (Phase 2: dynamic station routing).
-  // Fallbacks below are LOCAL-DEV PLACEHOLDERS ONLY — real duty
-  // numbers must be set via Render env vars, never committed here.
-  MDRRMO_BASE_PHONE: process.env.MDRRMO_BASE_PHONE || '+639170000001',
-  ARMMC_ER_PHONE: process.env.ARMMC_ER_PHONE || '+639170000002',
-  BFP_MAIN_STATION_PHONE: process.env.BFP_MAIN_STATION_PHONE || '+639170000003',
-  BFP_STATION_2_PHONE: process.env.BFP_STATION_2_PHONE || '+639170000004',
-  RIVER_COMMAND_PHONE: process.env.RIVER_COMMAND_PHONE || '+639170000005',
-  PNP_MAIN_HQ_PHONE: process.env.PNP_MAIN_HQ_PHONE || '+639170000006',
-  PNP_SUBSTATION_PHONE: process.env.PNP_SUBSTATION_PHONE || '+639170000007',
+  // Fallbacks below are the duty numbers provided by the Marikina
+  // team (station-data checklist) — overridable via Render env vars.
+  MDRRMO_BASE_PHONE: process.env.MDRRMO_BASE_PHONE || '161',
+  ARMMC_ER_PHONE: process.env.ARMMC_ER_PHONE || '(02) 942 0055',
+  BFP_MAIN_STATION_PHONE: process.env.BFP_MAIN_STATION_PHONE || '(02) 8681 0233',
+  BFP_STATION_2_PHONE: process.env.BFP_STATION_2_PHONE || '+63 950 519 9029',
+  RIVER_COMMAND_PHONE: process.env.RIVER_COMMAND_PHONE || '(02) 8541 7461',
+  PNP_MAIN_HQ_PHONE: process.env.PNP_MAIN_HQ_PHONE || '(02) 8405 0091',
+  PNP_SUBSTATION_PHONE: process.env.PNP_SUBSTATION_PHONE || '(02) 8508 8287',
 
   // JWT signing secret (Phase 2: staff auth).
   // Fallback below is a LOCAL-DEV PLACEHOLDER ONLY — set a strong,
