@@ -24,6 +24,11 @@ import { describe, it, expect, beforeAll } from 'vitest';
 // Mapbox behavior is verified separately via smoke test.
 import './blank-mapbox.mjs';
 
+// Same reasoning for the PAGASA river feed: pointing it at a dead
+// local port makes the widget test fail fast to `source: "mock"`
+// instead of riding out an 8s network timeout past vitest's 5s.
+import './blank-pagasa.mjs';
+
 import app from '../server.js';
 
 const MOCK_PASSWORD = 'changeme123';
