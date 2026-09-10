@@ -32,6 +32,13 @@ const { getDb } = require('../config/firebase');
 function ensureShape(incident) {
   if (!incident) return incident;
   if (!Array.isArray(incident.evidence)) incident.evidence = [];
+  if (typeof incident.evidenceUploading !== 'boolean') incident.evidenceUploading = false;
+  if (!Number.isInteger(incident.evidenceExpectedCount) || incident.evidenceExpectedCount < 0) {
+    incident.evidenceExpectedCount = 0;
+  }
+  if (!Number.isInteger(incident.evidenceFailedCount) || incident.evidenceFailedCount < 0) {
+    incident.evidenceFailedCount = 0;
+  }
   return incident;
 }
 
@@ -137,4 +144,32 @@ async function addEvidence(id, evidence) {
   return incident;
 }
 
-module.exports = { getAll, add, findById, updateStatus, addEvidence };
+/**
+ * Updates the evidence-upload progress fields on an incident. The
+ * mobile client signals when its background attachment loop starts
+ * (uploading) and finishes (failed count) so the web dashboard can
+ * tell dispatchers evidence is still inbound.
+ * @param {string} id
+ * @param {Object} patch contract: { evidenceUploading?, evidenceExpectedCount?, evidenceFailedCount? }
+ * @returns {Promise<Object|undefined>} updated incident, or undefined when missing
+ */
+async function updateEvidenceStatus(id, patch) {
+  const db = getDb();
+
+  if (db) {
+    // ---- PHASE 3 (cutover): read-modify-write onto the RTDB node ----
+    const snapshot = await db.ref(`incidents/${id}`).once('value');
+    const current = snapshot.val();
+    if (!current) return undefined;
+    await db.ref(`incidents/${id}`).update(patch);
+    return findById(id);
+  }
+
+  // ---- PHASE 2: in-memory mock fallback ----
+  const incident = ensureShape(mockIncidents.findById(id));
+  if (!incident) return undefined;
+  Object.assign(incident, patch);
+  return ensureShape(incident);
+}
+
+module.exports = { getAll, add, findById, updateStatus, addEvidence, updateEvidenceStatus };

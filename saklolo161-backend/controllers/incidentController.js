@@ -43,6 +43,11 @@ function generateIncidentId() {
 async function createIncident(req, res, next) {
   try {
     const { citizenPhone, category, location, notes } = req.body;
+    const rawExpectedCount = Number(req.body.evidenceExpectedCount);
+    const evidenceExpectedCount =
+      Number.isFinite(rawExpectedCount) && rawExpectedCount > 0
+        ? Math.floor(rawExpectedCount)
+        : 0;
 
     // Reverse-geocode the coordinates into a readable address.
     const address = await mapboxService.reverseGeocode(
@@ -62,6 +67,13 @@ async function createIncident(req, res, next) {
       status: 'Pending',
       notes: notes || '',
       timestamp: new Date().toISOString(),
+      // Additive evidence-upload fields (client-contract-safe): the mobile
+      // app knows how many attachments it will push right after submit, so
+      // this flips uploads to "inbound" immediately; updateEvidenceStatus
+      // flips it off when the loop finishes.
+      evidenceExpectedCount,
+      evidenceUploading: evidenceExpectedCount > 0,
+      evidenceFailedCount: 0,
     };
 
     await incidentService.add(newIncident);
@@ -196,9 +208,84 @@ async function updateIncidentStatus(req, res, next) {
   }
 }
 
+/**
+ * POST /api/incidents/:id/evidence-status
+ * Public, rate-limited. The mobile client signals evidence-upload
+ * progress so the web dashboard can tell dispatchers the report's
+ * attachments are still inbound (or partially failed). Only the three
+ * additive evidence fields may be updated here.
+ */
+async function updateEvidenceStatus(req, res, next) {
+  try {
+    const { id } = req.params;
+    const { evidenceUploading, evidenceExpectedCount, evidenceFailedCount } = req.body;
+
+    const patch = {};
+
+    if (evidenceUploading !== undefined) {
+      if (typeof evidenceUploading !== 'boolean') {
+        return res.status(400).json({
+          success: false,
+          message: 'evidenceUploading must be a boolean.',
+        });
+      }
+      patch.evidenceUploading = evidenceUploading;
+    }
+
+    if (evidenceExpectedCount !== undefined) {
+      if (!Number.isInteger(evidenceExpectedCount) || evidenceExpectedCount < 0) {
+        return res.status(400).json({
+          success: false,
+          message: 'evidenceExpectedCount must be a non-negative integer.',
+        });
+      }
+      patch.evidenceExpectedCount = evidenceExpectedCount;
+    }
+
+    if (evidenceFailedCount !== undefined) {
+      if (!Number.isInteger(evidenceFailedCount) || evidenceFailedCount < 0) {
+        return res.status(400).json({
+          success: false,
+          message: 'evidenceFailedCount must be a non-negative integer.',
+        });
+      }
+      patch.evidenceFailedCount = evidenceFailedCount;
+    }
+
+    if (Object.keys(patch).length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Provide at least one of: evidenceUploading, evidenceExpectedCount, evidenceFailedCount.',
+      });
+    }
+
+    const existing = await incidentService.findById(id);
+    if (!existing) {
+      return res.status(404).json({
+        success: false,
+        message: `Incident ${id} not found.`,
+      });
+    }
+
+    const updated = await incidentService.updateEvidenceStatus(id, patch);
+
+    return res.status(200).json({
+      success: true,
+      message: `Evidence upload status updated for incident ${id}.`,
+      data: {
+        ...updated,
+        elapsedMinutes: deriveElapsedMinutes(updated.timestamp),
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
 module.exports = {
   createIncident,
   getIncidents,
   getIncidentById,
   updateIncidentStatus,
+  updateEvidenceStatus,
 };

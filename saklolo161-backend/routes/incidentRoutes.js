@@ -16,6 +16,7 @@ const {
   getIncidents,
   getIncidentById,
   updateIncidentStatus,
+  updateEvidenceStatus,
 } = require('../controllers/incidentController');
 const { dispatchIncident } = require('../controllers/dispatchController');
 const {
@@ -62,6 +63,9 @@ router.get('/:id', getIncidentById);
 
 // POST /api/incidents/:id/evidence - attach a photo/file to an incident (public, IP rate-limited)
 router.post('/:id/evidence', evidenceRateLimiter, upload.single('file'), addEvidence);
+
+// POST /api/incidents/:id/evidence-status - mobile signals evidence upload progress (public, IP rate-limited)
+router.post('/:id/evidence-status', evidenceRateLimiter, updateEvidenceStatus);
 
 // GET /api/incidents/:id/evidence/:fileId/media - stream stored evidence bytes (public, rate-limited)
 router.get('/:id/evidence/:fileId/media', mediaRateLimiter, getEvidenceMedia);
