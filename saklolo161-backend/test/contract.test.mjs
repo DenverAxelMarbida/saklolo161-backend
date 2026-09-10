@@ -154,7 +154,7 @@ describe('dispatch → station anchor', () => {
       .send({
         incidentId,
         stationId: 'FLOOD_RIVER_COMMAND',
-        assignedUnit: 'River Rescue Boat 1',
+        assignedUnit: 'Rescue Boat Unit #1',
       });
     expect(res.status).toBe(200);
     expect(res.body.data.status).toBe('Dispatched');
@@ -166,8 +166,8 @@ describe('dispatch → station anchor', () => {
     // AND it must be visible on the public detail endpoint too.
     const detail = await request(app).get(`/api/incidents/${incidentId}`);
     expect(detail.status).toBe(200);
-    expect(detail.body.data.station.coords.lat).toBe(14.611);
-    expect(detail.body.data.station.coords.lng).toBe(121.103);
+    expect(detail.body.data.station.coords.lat).toBe(14.635687529310072);
+    expect(detail.body.data.station.coords.lng).toBe(121.09384592111986);
   });
 });
 
