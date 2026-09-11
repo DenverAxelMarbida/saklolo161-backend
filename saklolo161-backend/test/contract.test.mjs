@@ -17,7 +17,7 @@
  */
 
 import request from 'supertest';
-import { describe, it, expect, beforeAll } from 'vitest';
+import { describe, it, expect, beforeAll, vi } from 'vitest';
 
 // Must be imported BEFORE the app: blanks MAPBOX_ACCESS_TOKEN before
 // config/env.js loads, so routing deterministically takes the
@@ -31,6 +31,7 @@ import './blank-mapbox.mjs';
 import './blank-pagasa.mjs';
 
 import app from '../server.js';
+import routingService from '../services/routingService.js';
 
 const MOCK_PASSWORD = 'changeme123';
 
@@ -249,11 +250,57 @@ describe('dispatch → station anchor', () => {
     expect(res.body.data.station.name).toBeTruthy();
     expect(res.body.data.station.coords).toEqual({ lat: expect.any(Number), lng: expect.any(Number) });
 
+    // Dispatch now computes a real arrival ETA (whole minutes) so the
+    // citizen SMS and mobile tracker show driving time, not readiness.
+    expect(res.body.data.dispatch).toBeTruthy();
+    expect(Number.isInteger(res.body.data.dispatch.arrivalEtaMinutes)).toBe(true);
+    expect(res.body.data.dispatch.arrivalEtaMinutes).toBeGreaterThanOrEqual(1);
+
     // AND it must be visible on the public detail endpoint too.
     const detail = await request(app).get(`/api/incidents/${incidentId}`);
     expect(detail.status).toBe(200);
     expect(detail.body.data.station.coords.lat).toBe(14.635687529310072);
     expect(detail.body.data.station.coords.lng).toBe(121.09384592111986);
+  });
+
+  it('texts the citizen a real arrival ETA (straight-line fallback in suite)', async () => {
+    const token = await loginAs('flood');
+    const expectedMin = Math.max(
+      1,
+      Math.round(
+        (routingService.haversineMeters(
+          14.635687529310072,
+          121.09384592111986,
+          14.6507,
+          121.1029
+        ) /
+          (100000 / 9000)) /
+          60
+      )
+    );
+
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      const res = await request(app)
+        .post('/api/incidents/dispatch')
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          incidentId,
+          stationId: 'FLOOD_RIVER_COMMAND',
+          assignedUnit: 'Rescue Boat Unit #1',
+        });
+      expect(res.status).toBe(200);
+      expect(res.body.data.dispatch.arrivalEtaMinutes).toBe(expectedMin);
+
+      const detail = await request(app).get(`/api/incidents/${incidentId}`);
+      expect(detail.body.data.dispatch.arrivalEtaMinutes).toBe(expectedMin);
+
+      const smsLog = logSpy.mock.calls.map((c) => String(c[0]));
+      expect(smsLog.some((line) => line.includes(`Arrival ETA: ~${expectedMin} min`))).toBe(true);
+      expect(smsLog.some((line) => line.includes('ETA: 2–5 mins'))).toBe(false);
+    } finally {
+      logSpy.mockRestore();
+    }
   });
 });
 
