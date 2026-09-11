@@ -13,6 +13,7 @@
 const incidentService = require('../services/incidentService');
 const stationService = require('../services/stationService');
 const semaphoreService = require('../services/semaphoreService');
+const { getRoute } = require('../services/routingService');
 
 /**
  * POST /api/incidents/dispatch
@@ -104,6 +105,14 @@ async function dispatchIncident(req, res, next) {
       estimatedTurnout: station.estimatedTurnout,
       dispatchedAt: new Date().toISOString(),
     };
+    // Compute a real driving ETA from the same routing service the web
+    // dashboard uses whenever both coordinates exist, so the citizen SMS
+    // and the mobile tracker show arrival time — never the station's
+    // canned readiness string, which can be wildly short when a unit is
+    // dispatched across town.
+    const arrivalEtaMinutes = await computeArrivalEta(station, incident.location);
+    if (arrivalEtaMinutes) updated.dispatch.arrivalEtaMinutes = arrivalEtaMinutes;
+
     // Contract anchor: the responding station is exposed at the TOP
     // level (`incident.station.coords`), not nested under dispatch.
     updated.station = {
@@ -136,10 +145,44 @@ async function notifyStation(station, incident, assignedUnit) {
 
 /**
  * Notifies the citizen that a unit has been dispatched to their location.
+ * The message uses the computed arrival ETA when one exists, falling back
+ * to the station's readiness string ("2–5 mins") only when coordinates
+ * were missing at dispatch time.
  */
 async function notifyCitizen(incident, station, assignedUnit) {
-  const message = `Saklolo 161: ${station.name} has dispatched ${assignedUnit} to your location. ETA: ${station.estimatedTurnout}.`;
+  const eta = Number.isInteger(incident.dispatch?.arrivalEtaMinutes)
+    ? `~${incident.dispatch.arrivalEtaMinutes} min`
+    : station.estimatedTurnout;
+  const message = `Saklolo 161: ${station.name} has dispatched ${assignedUnit} to your location. Arrival ETA: ${eta}.`;
   return semaphoreService.sendSms(incident.citizenPhone, message);
+}
+
+/**
+ * Computes a real arrival ETA (whole minutes, clamped to >= 1) via the
+ * same routing service the web dashboard uses. Returns null when either
+ * endpoint lacks coordinates or the routing call fails — a dispatch must
+ * never fail over an ETA computation; notifyCitizen then falls back to
+ * the station's canned readiness string.
+ */
+async function computeArrivalEta(station, location) {
+  const c = station && station.coords;
+  if (
+    !c ||
+    typeof c.lat !== 'number' ||
+    typeof c.lng !== 'number' ||
+    !location ||
+    typeof location.latitude !== 'number' ||
+    typeof location.longitude !== 'number'
+  ) {
+    return null;
+  }
+  try {
+    const route = await getRoute(c.lat, c.lng, location.latitude, location.longitude);
+    return Math.max(1, Math.round(route.durationSeconds / 60));
+  } catch (error) {
+    console.error('dispatchController: ETA computation failed:', error.message);
+    return null;
+  }
 }
 
 module.exports = { dispatchIncident };
