@@ -119,6 +119,37 @@ async function updateStatus(id, status) {
 }
 
 /**
+ * Attaches the dispatch blocks (`dispatch`, `station`) to an
+ * incident and returns the persisted record.
+ *
+ * The old flow mutated the object returned by updateStatus() and
+ * relied on the mock store's reference aliasing to keep those
+ * changes — RTDB reads are plain objects, so that mutation never
+ * reached Firebase. This method does an explicit read-modify-write
+ * on `incidents/{id}` instead, then re-reads so the caller gets
+ * exactly what a later findById() will return.
+ *
+ * @param {string} id incident id
+ * @param {Object} patch contract: { dispatch?, station? }
+ * @returns {Promise<Object|undefined>} updated incident, or undefined if missing
+ */
+async function attachDispatch(id, patch) {
+  const db = getDb();
+
+  if (db) {
+    // ---- PHASE 3: real Firebase Realtime Database write ----
+    await db.ref(`incidents/${id}`).update(patch);
+    return findById(id);
+  }
+
+  // ---- PHASE 2: in-memory mock fallback (mutate in place, as before) ----
+  const incident = ensureShape(mockIncidents.findById(id));
+  if (!incident) return undefined;
+  Object.assign(incident, patch);
+  return incident;
+}
+
+/**
  * Appends an evidence record to an incident's `evidence[]`.
  * Returns the updated incident, or undefined when the incident does
  * not exist.
@@ -172,4 +203,4 @@ async function updateEvidenceStatus(id, patch) {
   return ensureShape(incident);
 }
 
-module.exports = { getAll, add, findById, updateStatus, addEvidence, updateEvidenceStatus };
+module.exports = { getAll, add, findById, updateStatus, attachDispatch, addEvidence, updateEvidenceStatus };
