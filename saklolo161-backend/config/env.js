@@ -34,8 +34,17 @@ module.exports = {
   SEMAPHORE_SENDER_NAME: process.env.SEMAPHORE_SENDER_NAME || 'SAKLOLO161',
 
   // Firebase
+  // Option A (local): FIREBASE_CREDENTIALS = file path to the
+  // gitignored service-account JSON. Option B (CI/Render):
+  // FIREBASE_CREDENTIALS_JSON = the JSON as one env-var string.
+  // Option B wins when both are set. Values are never logged.
   FIREBASE_CREDENTIALS: process.env.FIREBASE_CREDENTIALS || '',
+  FIREBASE_CREDENTIALS_JSON: process.env.FIREBASE_CREDENTIALS_JSON || '',
   FIREBASE_DATABASE_URL: process.env.FIREBASE_DATABASE_URL || '',
+
+  // Firebase Auth — Web API key (Auth REST signInWithPassword login
+  // flow only). Local secret: lives in .env (gitignored), never logged.
+  FIREBASE_WEB_API_KEY: process.env.FIREBASE_WEB_API_KEY || '',
 
   // Station duty phones (Phase 2: dynamic station routing).
   // Fallbacks below are the duty numbers provided by the Marikina
