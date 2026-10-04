@@ -34,12 +34,29 @@ jobs:
           test ! -f server.js
           test ! -f package.json
 
+      # Firebase configuration comes ONLY from repository secrets —
+      # never hardcoded. Create these in Settings -> Secrets and
+      # variables -> Actions before this workflow can pass:
+      #   FIREBASE_CREDENTIALS_JSON  (service-account JSON, single line)
+      #   FIREBASE_DATABASE_URL      (RTDB instance URL)
+      #   FIREBASE_WEB_API_KEY       (Firebase Auth web API key)
+      # The suite also expects the 5 staff accounts to be provisioned
+      # and /stations seeded in that Firebase project (one-time,
+      # local: node scripts/provisionUser.js / node scripts/seedStations.js).
       - name: Contract tests
         working-directory: ./saklolo161-backend
+        env:
+          FIREBASE_CREDENTIALS_JSON: ${{ secrets.FIREBASE_CREDENTIALS_JSON }}
+          FIREBASE_DATABASE_URL: ${{ secrets.FIREBASE_DATABASE_URL }}
+          FIREBASE_WEB_API_KEY: ${{ secrets.FIREBASE_WEB_API_KEY }}
         run: npm test
 
       - name: Boot and auth smoke test
         working-directory: ./saklolo161-backend
+        env:
+          FIREBASE_CREDENTIALS_JSON: ${{ secrets.FIREBASE_CREDENTIALS_JSON }}
+          FIREBASE_DATABASE_URL: ${{ secrets.FIREBASE_DATABASE_URL }}
+          FIREBASE_WEB_API_KEY: ${{ secrets.FIREBASE_WEB_API_KEY }}
         run: |
           PORT=5999 node server.js & SERVER_PID=$!
           sleep 3
