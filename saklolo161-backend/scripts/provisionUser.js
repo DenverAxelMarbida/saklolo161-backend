@@ -1,32 +1,31 @@
 /**
  * scripts/provisionUser.js
  * --------------------------------------------------------------
- * Standalone CLI script (NOT mounted as a route) that creates a
- * new mock dispatcher/admin account for the Phase 2 staff-auth
- * layer. Hashes the password with bcryptjs and appends the user
- * via data/mockUsers.js's addUser().
+ * Standalone CLI script (NOT mounted as a route) that creates or
+ * updates a Firebase Authentication account for the Phase 3 staff
+ * auth layer, and assigns the { agency, role } custom claims the
+ * backend maps into the frozen payload contract
+ * ({ uid, email, agency, role }).
  *
  * Usage:
  *     node scripts/provisionUser.js --email=new@marikina.gov.ph --password=temp123 --agency=FIRE --role=dispatcher
  *
  * Required args:
  *   --email    account email (used to log in)
- *   --password plaintext password (hashed with bcryptjs cost 10)
+ *   --password plaintext password (stored by Firebase Auth, never here)
  *   --agency   MEDICAL | FIRE | FLOOD | CRIME | ALL
  *   --role     dispatcher | admin
  *
- * IMPORTANT: data/mockUsers.js is an in-memory array, so the new
- * user lives only in this script's process and disappears when the
- * server restarts — fine for local dev/testing, not for persistence.
- * This script's interface (email/password/agency/role in, user
- * created) is exactly what gets pointed at Firebase Auth's
- * user-creation API in Phase 3 instead, leaving the call sites
- * unchanged.
+ * Idempotent: if the email already exists in Firebase Auth, the
+ * password is reset and the claims are re-set — safe to re-run when
+ * re-provisioning (e.g. the 5 seed accounts from data/mockUsers.js).
+ *
+ * Replaces the Phase 2 bcrypt + mockUsers.addUser() flow; same CLI
+ * interface, so call sites/scripts that invoke it don't change.
  * --------------------------------------------------------------
  */
 
-const bcrypt = require('bcryptjs');
-const mockUsers = require('../data/mockUsers');
+const { initializeFirebase, getFirebaseAuth } = require('../config/firebase');
 
 const USAGE = `node scripts/provisionUser.js --email=you@marikina.gov.ph --password=temp123 --agency=FIRE --role=dispatcher`;
 
@@ -72,27 +71,41 @@ async function main() {
   if (!VALID_ROLES.includes(role)) {
     fail(`role must be one of: ${VALID_ROLES.join(', ')}.`);
   }
-  if (mockUsers.findByEmail(email)) {
-    fail(`A user with email "${email}" already exists.`);
+
+  initializeFirebase();
+  const auth = getFirebaseAuth();
+
+  let uid;
+  let created = false;
+
+  try {
+    const existing = await auth.getUserByEmail(email);
+    uid = existing.uid;
+    await auth.updateUser(uid, { password });
+    console.log('♻️   Existing Firebase Auth user updated (password reset).');
+  } catch (err) {
+    if (err.code !== 'auth/user-not-found') {
+      throw err;
+    }
+    const user = await auth.createUser({ email, password });
+    uid = user.uid;
+    created = true;
+    console.log('✅  Firebase Auth user created.');
   }
 
-  const passwordHash = await bcrypt.hash(password, 10);
+  // Custom claims ride inside every ID token issued from now on —
+  // that's where authService.buildPayload() reads agency/role from.
+  await auth.setCustomUserClaims(uid, { agency, role });
 
-  const newUser = {
-    uid: `u${mockUsers.getAll().length + 1}`,
-    email,
-    passwordHash,
-    agency,
-    role,
-  };
+  console.log(`   uid    : ${uid}`);
+  console.log(`   email  : ${email}`);
+  console.log(`   agency : ${agency}`);
+  console.log(`   role   : ${role}`);
+  console.log(created ? '   claims : set' : '   claims : re-set');
 
-  mockUsers.addUser(newUser);
-
-  console.log('✅  Mock user created (in-memory only, resets on server restart).');
-  console.log(`   uid    : ${newUser.uid}`);
-  console.log(`   email  : ${newUser.email}`);
-  console.log(`   agency : ${newUser.agency}`);
-  console.log(`   role   : ${newUser.role}`);
+  // firebase-admin keeps a credential-refresh timer alive; exit
+  // explicitly so the CLI returns to the shell instead of hanging.
+  process.exit(0);
 }
 
 main().catch((err) => {
