@@ -17,7 +17,16 @@
  */
 
 import request from 'supertest';
-import { describe, it, expect, beforeAll, vi } from 'vitest';
+import {
+  describe,
+  it,
+  expect,
+  beforeAll,
+  afterAll,
+  beforeEach,
+  afterEach,
+  vi,
+} from 'vitest';
 
 // Must be imported BEFORE the app: blanks MAPBOX_ACCESS_TOKEN before
 // config/env.js loads, so routing deterministically takes the
@@ -30,10 +39,30 @@ import './blank-mapbox.mjs';
 // instead of riding out an 8s network timeout past vitest's 5s.
 import './blank-pagasa.mjs';
 
+// And for Semaphore: force SEMAPHORE_API_KEY empty before config/env.js
+// loads, so no app-level test path (incident create / dispatch / status)
+// can ever reach the real SMS API.
+import './blank-semaphore.mjs';
+
 import app from '../server.js';
 import routingService from '../services/routingService.js';
+import semaphoreService from '../services/semaphoreService.js';
+import { createRequire } from 'node:module';
+
+// sendSms() reads config/env through CommonJS `require`, which lands in
+// Node's require cache — a DIFFERENT module instance from a vitest ESM
+// `import env from`. Grab the shared instance here so these tests can
+// actually flip SEMAPHORE_API_KEY on the object the service reads.
+const env = createRequire(import.meta.url)('../config/env.js');
 
 const MOCK_PASSWORD = 'changeme123';
+
+// sendSms() must NEVER reject — it warns instead when SEMAPHORE_API_KEY is
+// missing, which is the suite's default state thanks to blank-semaphore.mjs
+// and would otherwise spam every incident/dispatch test. Silence console.warn
+// globally; the missing-key test below asserts on warnSpy.
+const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+afterAll(() => warnSpy.mockRestore());
 
 async function loginAs(agency) {
   const res = await request(app).post('/api/auth/login').send({
@@ -272,7 +301,7 @@ describe('dispatch → station anchor', () => {
     expect(detail.body.data.station.coords.lng).toBe(121.09384592111986);
   });
 
-  it('texts the citizen a real arrival ETA (straight-line fallback in suite)', async () => {
+  it('texts the citizen a real arrival ETA (fetch stubbed — no real SMS)', async () => {
     const token = await loginAs('flood');
     const expectedMin = Math.max(
       1,
@@ -288,7 +317,17 @@ describe('dispatch → station anchor', () => {
       )
     );
 
-    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    // Stub fetch + configure a throwaway key so sendSms() actually
+    // builds the Semaphore request — the assertion below inspects the
+    // request body instead of the old "[MOCK SMS]" console line, and
+    // no network call leaves the process.
+    const fetchSpy = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ status: 'success', count: 1 }),
+    }));
+    vi.stubGlobal('fetch', fetchSpy);
+    env.SEMAPHORE_API_KEY = 'test-key-contract-suite';
     try {
       const res = await request(app)
         .post('/api/incidents/dispatch')
@@ -304,11 +343,19 @@ describe('dispatch → station anchor', () => {
       const detail = await request(app).get(`/api/incidents/${incidentId}`);
       expect(detail.body.data.dispatch.arrivalEtaMinutes).toBe(expectedMin);
 
-      const smsLog = logSpy.mock.calls.map((c) => String(c[0]));
-      expect(smsLog.some((line) => line.includes(`Arrival ETA: ~${expectedMin} min`))).toBe(true);
-      expect(smsLog.some((line) => line.includes('ETA: 2–5 mins'))).toBe(false);
+      expect(fetchSpy).toHaveBeenCalled();
+      const [url, init] = fetchSpy.mock.calls[0];
+      expect(url).toBe('https://api.semaphore.co/api/v4/messages');
+      expect(init.method).toBe('POST');
+
+      const smsBodies = fetchSpy.mock.calls.map((call) => JSON.parse(call[1].body));
+      const citizenSms = smsBodies.find((b) => b.number === '+639121987654');
+      expect(citizenSms).toBeTruthy();
+      expect(citizenSms.message).toContain(`Arrival ETA: ~${expectedMin} min`);
+      expect(citizenSms.message).not.toContain('ETA: 2–5 mins');
     } finally {
-      logSpy.mockRestore();
+      vi.unstubAllGlobals();
+      env.SEMAPHORE_API_KEY = '';
     }
   });
 });
@@ -382,5 +429,132 @@ describe('POST /api/incidents/:id/evidence', () => {
     );
     expect(res.status).toBe(404);
     expect(res.body.success).toBe(false);
+  });
+});
+
+describe('sendSms (Semaphore)', () => {
+  const ORIGINAL_KEY = env.SEMAPHORE_API_KEY;
+  const TEST_KEY = 'test-key-contract-suite';
+  let fetchSpy;
+  let errorSpy;
+
+  beforeEach(() => {
+    warnSpy.mockClear();
+    // Failure-path tests below exercise console.error logging; scope the
+    // silencing to THIS block so unrelated server errors stay visible.
+    errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    fetchSpy = vi.fn();
+    vi.stubGlobal('fetch', fetchSpy);
+    env.SEMAPHORE_API_KEY = TEST_KEY;
+  });
+
+  afterEach(() => {
+    errorSpy.mockRestore();
+    vi.unstubAllGlobals();
+    env.SEMAPHORE_API_KEY = ORIGINAL_KEY;
+  });
+
+  it('skips without calling fetch when the API key is missing', async () => {
+    env.SEMAPHORE_API_KEY = '';
+
+    const result = await semaphoreService.sendSms('+639171234567', 'Help is on the way.');
+
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(result.success).toBe(false);
+    expect(result.mock).toBe(false);
+    expect(result.skipped).toBe(true);
+    expect(result.message).toContain('API key is not configured');
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(String(warnSpy.mock.calls[0][0])).toContain('API key is not configured');
+    expect(JSON.stringify(result)).not.toContain(TEST_KEY);
+  });
+
+  it('POSTs the expected payload to the Semaphore endpoint on success', async () => {
+    fetchSpy.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ status: 'success', count: 1 }),
+    });
+
+    const result = await semaphoreService.sendSms('+639171234567', 'Help is on the way.');
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchSpy.mock.calls[0];
+    expect(url).toBe('https://api.semaphore.co/api/v4/messages');
+    expect(init.method).toBe('POST');
+    expect(init.headers['Content-Type']).toBe('application/json');
+    // Request budget: AbortSignal.timeout() must be attached (Node 20).
+    expect(init.signal).toBeInstanceOf(AbortSignal);
+    expect(JSON.parse(init.body)).toEqual({
+      apikey: TEST_KEY,
+      number: '+639171234567',
+      message: 'Help is on the way.',
+      sendername: env.SEMAPHORE_SENDER_NAME,
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.mock).toBe(false);
+    expect(result.data).toEqual({ status: 'success', count: 1 });
+    expect(JSON.stringify(result)).not.toContain(TEST_KEY);
+  });
+
+  it('resolves safely on a non-2xx Semaphore response', async () => {
+    fetchSpy.mockResolvedValue({
+      ok: false,
+      status: 400,
+      json: async () => ({ message: 'Invalid number' }),
+    });
+
+    // Awaiting directly is the assertion: sendSms() must resolve, never reject.
+    const result = await semaphoreService.sendSms('161', 'DISPATCH alert');
+    expect(result).toBeDefined();
+
+    expect(result.success).toBe(false);
+    expect(result.mock).toBe(false);
+    expect(result.message).toContain('400');
+  });
+
+  it('resolves safely on a network/fetch failure', async () => {
+    fetchSpy.mockRejectedValue(new Error('network down'));
+
+    // Awaiting directly is the assertion: sendSms() must resolve, never reject.
+    const result = await semaphoreService.sendSms('+639171234567', 'Help is on the way.');
+    expect(result).toBeDefined();
+
+    expect(result.success).toBe(false);
+    expect(result.mock).toBe(false);
+    expect(result.error).toContain('network down');
+  });
+
+  it('resolves safely on a timeout', async () => {
+    const timeoutError = new Error('The operation was aborted due to timeout');
+    timeoutError.name = 'TimeoutError';
+    fetchSpy.mockRejectedValue(timeoutError);
+
+    // Awaiting directly is the assertion: sendSms() must resolve, never reject.
+    const result = await semaphoreService.sendSms('+639171234567', 'Help is on the way.');
+    expect(result).toBeDefined();
+
+    expect(result.success).toBe(false);
+    expect(result.mock).toBe(false);
+    expect(result.message.toLowerCase()).toContain('timed out');
+  });
+
+  it('resolves safely when the response body is not valid JSON', async () => {
+    fetchSpy.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => {
+        throw new SyntaxError('Unexpected token < in JSON');
+      },
+    });
+
+    // Awaiting directly is the assertion: sendSms() must resolve, never reject.
+    const result = await semaphoreService.sendSms('+639171234567', 'Help is on the way.');
+    expect(result).toBeDefined();
+
+    expect(result.success).toBe(false);
+    expect(result.mock).toBe(false);
+    expect(result.message.toLowerCase()).toContain('json');
   });
 });
