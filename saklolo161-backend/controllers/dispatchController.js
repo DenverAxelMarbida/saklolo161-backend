@@ -97,29 +97,39 @@ async function dispatchIncident(req, res, next) {
     }
 
     // ---- 5. Update the incident record ----
-    const updated = await incidentService.updateStatus(incidentId, 'Dispatched');
-    updated.dispatch = {
-      stationId: station.id,
-      stationName: station.name,
-      assignedUnit,
-      estimatedTurnout: station.estimatedTurnout,
-      dispatchedAt: new Date().toISOString(),
-    };
+    await incidentService.updateStatus(incidentId, 'Dispatched');
+
     // Compute a real driving ETA from the same routing service the web
     // dashboard uses whenever both coordinates exist, so the citizen SMS
     // and the mobile tracker show arrival time — never the station's
     // canned readiness string, which can be wildly short when a unit is
     // dispatched across town.
     const arrivalEtaMinutes = await computeArrivalEta(station, incident.location);
-    if (arrivalEtaMinutes) updated.dispatch.arrivalEtaMinutes = arrivalEtaMinutes;
+
+    const dispatchBlock = {
+      stationId: station.id,
+      stationName: station.name,
+      assignedUnit,
+      estimatedTurnout: station.estimatedTurnout,
+      dispatchedAt: new Date().toISOString(),
+    };
+    if (arrivalEtaMinutes) dispatchBlock.arrivalEtaMinutes = arrivalEtaMinutes;
 
     // Contract anchor: the responding station is exposed at the TOP
     // level (`incident.station.coords`), not nested under dispatch.
-    updated.station = {
+    const stationBlock = {
       id: station.id,
       name: station.name,
       coords: station.coords || null,
     };
+
+    // Persist both blocks via the service (mutating the returned
+    // record directly only lands in the mock store — RTDB re-reads
+    // are plain objects). Returns the persisted incident.
+    const updated = await incidentService.attachDispatch(incidentId, {
+      dispatch: dispatchBlock,
+      station: stationBlock,
+    });
 
     // ---- 6. Notify station + citizen (mocked via semaphoreService in Phase 1/2) ----
     await notifyStation(station, updated, assignedUnit);

@@ -212,10 +212,19 @@ describe('GET /api/incidents (auth boundary)', () => {
 });
 
 describe('GET /api/incidents/:id', () => {
+  let incidentId;
+
+  beforeAll(async () => {
+    const created = await request(app)
+      .post('/api/incidents')
+      .send({ ...makeIncident(), citizenPhone: '+639121987658' });
+    incidentId = created.body.data.incidentId;
+  });
+
   it('is public and always includes an evidence array', async () => {
-    const res = await request(app).get('/api/incidents/INC-20250811-0001');
+    const res = await request(app).get(`/api/incidents/${incidentId}`);
     expect(res.status).toBe(200);
-    expect(res.body.data.incidentId).toBe('INC-20250811-0001');
+    expect(res.body.data.incidentId).toBe(incidentId);
     expect(Array.isArray(res.body.data.evidence)).toBe(true);
   });
 

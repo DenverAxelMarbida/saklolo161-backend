@@ -3,13 +3,16 @@
  * --------------------------------------------------------------
  * Abstraction layer over "how staff credentials are validated and
  * how tokens are issued/verified". Controllers and middleware NEVER
- * import mockUsers, bcryptjs, or jsonwebtoken directly — they only
- * call the functions exported here. That's what makes the Phase 3
- * Firebase Auth migration a one-file change: swap the internals
- * below, and nothing else in the codebase needs to know.
+ * import firebase-admin, axios, or the Auth REST API directly — they
+ * only call the functions exported here. That's what kept the
+ * Phase 3 Firebase Auth cutover a one-file change: the internals
+ * below swapped (bcrypt/jsonwebtoken/mockUsers → Firebase Auth),
+ * the interface and payload contract did not.
  *
- * See the PHASE 3 MIGRATION NOTE under each function for exactly
- * what changes when Firebase Auth is wired up.
+ * Frozen payload contract (see ../Phase 3/saklolo161-phase3-
+ * contracts.md): every resolved user is EXACTLY
+ * { uid, email, agency, role } — agency/role come from Firebase
+ * custom claims set at provisioning time (scripts/provisionUser.js).
  *
  * Modeled on services/stationService.js: same "one service file
  * the rest of the app depends on, never the underlying library/
@@ -17,80 +20,93 @@
  * --------------------------------------------------------------
  */
 
-const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken');
-const mockUsers = require('../data/mockUsers');
-const { JWT_SECRET } = require('../config/env');
+const axios = require('axios');
+const { FIREBASE_WEB_API_KEY } = require('../config/env');
+const { getFirebaseAuth } = require('../config/firebase');
 
-const TOKEN_TTL = '8h'; // one dispatcher shift
+const AUTH_REST_TIMEOUT_MS = 10000;
 
 /**
- * Validates a dispatcher/admin's email + password and issues a JWT.
+ * Maps a decoded Firebase ID token (custom claims included) to the
+ * frozen payload shape. Rejects tokens missing the claims the
+ * authorization layer depends on, so verifyAuth responds 401 instead
+ * of a controller crashing on `agency.toLowerCase()` of undefined.
  *
- * PHASE 3 MIGRATION NOTE:
- * When Firebase Auth is wired up, this function gets replaced with a
- * call to Firebase's admin sign-in flow (admin.auth().getUserByEmail()
- * + a password check, or the SDK's signInWithPassword equivalent), or
- * is dropped entirely if login moves client-side to the Firebase SDK.
- * Because every other file calls authService.login() rather than
- * bcrypt/mockUsers directly, no other file needs to change.
+ * @param {object} decoded result of admin.auth().verifyIdToken()
+ * @returns {{ uid: string, email: string|undefined, agency: string, role: string }}
+ * @throws If uid, agency, or role is missing.
+ */
+function buildPayload(decoded) {
+  const { uid, email, agency, role } = decoded;
+
+  if (!uid || !agency || !role) {
+    throw new Error('Token is missing required claims (agency, role).');
+  }
+
+  return { uid, email, agency, role };
+}
+
+/**
+ * Validates a dispatcher/admin's email + password against Firebase
+ * Authentication (Auth REST `accounts:signInWithPassword`) and
+ * returns the freshly issued Firebase ID token plus its payload.
+ *
+ * Preserves the POST /api/auth/login contract:
+ *   200 { success, data: { token, user: { uid, email, agency, role } } }
+ * Failures throw a generic 'Invalid email or password.' (never
+ * leaking whether the email or the password was the wrong part),
+ * matching the Phase 2 behavior; a missing/unconfigured API key or
+ * an unreachable Auth service surfaces as its own message.
  *
  * @param {string} email
  * @param {string} password
  * @returns {Promise<{ token: string, user: { uid, email, agency, role } }>}
  */
 async function login(email, password) {
-  const user = mockUsers.findByEmail(email);
+  if (!FIREBASE_WEB_API_KEY) {
+    throw new Error(
+      'Firebase Auth login is not configured (missing FIREBASE_WEB_API_KEY).'
+    );
+  }
 
-  // Generic failure — never leak whether the email or the password was
-  // the wrong part.
-  const fail = () => {
-    throw new Error('Invalid email or password.');
-  };
+  let idToken;
+  try {
+    const res = await axios.post(
+      `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${FIREBASE_WEB_API_KEY}`,
+      { email, password, returnSecureToken: true },
+      { timeout: AUTH_REST_TIMEOUT_MS }
+    );
+    idToken = res.data.idToken;
+  } catch (err) {
+    const status = err.response && err.response.status;
+    if (status >= 400 && status < 500) {
+      // INVALID_PASSWORD / EMAIL_NOT_FOUND / INVALID_EMAIL all
+      // collapse to the same generic message (Phase 2 behavior).
+      throw new Error('Invalid email or password.');
+    }
+    throw new Error('Authentication service unavailable.');
+  }
 
-  if (!user) fail();
-
-  const passwordOk = await bcrypt.compare(password, user.passwordHash);
-  if (!passwordOk) fail();
-
-  // Payload shape is intentionally { uid, email, agency, role } to match
-  // what Firebase ID-token custom claims would look like later, so client
-  // code (web + mobile) doesn't need to change in Phase 3.
-  const payload = {
-    uid: user.uid,
-    email: user.email,
-    agency: user.agency,
-    role: user.role,
-  };
-
-  const token = jwt.sign(payload, JWT_SECRET, { expiresIn: TOKEN_TTL });
-
-  return { token, user: payload };
+  // Verify the issued token so login returns exactly what
+  // verifyToken() would resolve later — and fail loudly here if the
+  // account was provisioned without { agency, role } claims.
+  const decoded = await getFirebaseAuth().verifyIdToken(idToken);
+  return { token: idToken, user: buildPayload(decoded) };
 }
 
 /**
- * Verifies and decodes a JWT, returning its payload.
+ * Verifies a Firebase ID token, returning its frozen payload.
  *
- * PHASE 3 MIGRATION NOTE:
- * When Firebase Auth is wired up, this function gets replaced with
- * admin.auth().verifyIdToken(token) (returning Firebase's decoded
- * claims, which already carry the same uid/email/custom-claims shape).
- * Because every other file calls authService.verifyToken() rather than
- * jsonwebtoken directly, no other file needs to change.
- *
- * @param {string} token
+ * @param {string} token Firebase ID token (Bearer header value)
  * @returns {Promise<{ uid, email, agency, role }>}
- * @throws If the token is invalid or expired — the caller
- *         (verifyAuth middleware) turns this into a 401.
+ * @throws If the token is invalid/expired or lacks the required
+ *         claims — the caller (verifyAuth middleware) turns this
+ *         into a 401. Legacy Phase 2 JWTs throw here too, which is
+ *         the intended forced-re-login behavior.
  */
 async function verifyToken(token) {
-  const decoded = jwt.verify(token, JWT_SECRET);
-  return {
-    uid: decoded.uid,
-    email: decoded.email,
-    agency: decoded.agency,
-    role: decoded.role,
-  };
+  const decoded = await getFirebaseAuth().verifyIdToken(token);
+  return buildPayload(decoded);
 }
 
 module.exports = { login, verifyToken };
