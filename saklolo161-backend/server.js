@@ -24,6 +24,7 @@ const incidentRoutes = require('./routes/incidentRoutes');
 const weatherRoutes = require('./routes/weatherRoutes');
 const authRoutes = require('./routes/authRoutes');
 const routingRoutes = require('./routes/routingRoutes');
+const userRoutes = require('./routes/userRoutes');
 
 const app = express();
 
@@ -49,6 +50,7 @@ app.use('/api/incidents', incidentRoutes);
 app.use('/api/weather-river', weatherRoutes);
 app.use('/api/auth', authRoutes);
 app.use('/api/routes', routingRoutes);
+app.use('/api/users', userRoutes);
 
 // ---- 404 + Error Handlers (must be registered LAST) -----------------------
 app.use(notFoundHandler);
