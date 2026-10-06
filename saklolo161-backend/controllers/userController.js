@@ -18,6 +18,8 @@
  */
 
 const userService = require('../services/userService');
+const authService = require('../services/authService');
+const { passwordFailures } = require('../services/passwordPolicy');
 
 const { VALID_AGENCIES, VALID_ROLES } = userService;
 
@@ -97,6 +99,13 @@ async function createUser(req, res) {
       return res.status(400).json({
         success: false,
         message: 'password is required.',
+      });
+    }
+    const policyFailures = passwordFailures(password);
+    if (policyFailures.length > 0) {
+      return res.status(400).json({
+        success: false,
+        message: `Password ${policyFailures.join('; ')}.`,
       });
     }
     if (!VALID_AGENCIES.includes(agency)) {
@@ -211,4 +220,83 @@ async function setUserEnabled(req, res) {
   }
 }
 
-module.exports = { listUsers, createUser, updateUser, setUserEnabled };
+/**
+ * POST /api/users/me/password — self-service change (any authenticated
+ * user, admin OR dispatcher; NO requireAdmin on this route).
+ * Body: { currentPassword, newPassword, confirmNewPassword } → 200.
+ *
+ * uid/email ALWAYS come from req.user (the verified token) — a
+ * uid/email in the body is ignored, so nobody can target another
+ * account. The current password is re-verified against Firebase
+ * (authService.verifyPassword — the reauthenticateWithCredential
+ * equivalent) before userService.setPassword applies the new one.
+ * Neither password is ever logged or echoed back.
+ */
+async function changeOwnPassword(req, res) {
+  try {
+    const { currentPassword, newPassword, confirmNewPassword } = req.body || {};
+
+    if (!currentPassword || typeof currentPassword !== 'string') {
+      return res.status(400).json({
+        success: false,
+        message: 'Current password is required.',
+      });
+    }
+    if (!newPassword || typeof newPassword !== 'string') {
+      return res.status(400).json({
+        success: false,
+        message: 'New password is required.',
+      });
+    }
+    if (!confirmNewPassword || typeof confirmNewPassword !== 'string') {
+      return res.status(400).json({
+        success: false,
+        message: 'Please confirm the new password.',
+      });
+    }
+    if (newPassword !== confirmNewPassword) {
+      return res.status(400).json({
+        success: false,
+        message: 'Passwords do not match.',
+      });
+    }
+
+    const policyFailures = passwordFailures(newPassword);
+    if (policyFailures.length > 0) {
+      return res.status(400).json({
+        success: false,
+        message: `Password ${policyFailures.join('; ')}.`,
+      });
+    }
+    if (newPassword === currentPassword) {
+      return res.status(400).json({
+        success: false,
+        message: 'New password must be different from the current password.',
+      });
+    }
+
+    // Re-authentication: prove the current password for the token's
+    // own email before touching Firebase.
+    const currentPasswordValid = await authService.verifyPassword(
+      req.user.email,
+      currentPassword
+    );
+    if (!currentPasswordValid) {
+      return res.status(400).json({
+        success: false,
+        message: 'Current password is incorrect.',
+      });
+    }
+
+    await userService.setPassword(req.user.uid, newPassword);
+
+    return res.status(200).json({
+      success: true,
+      message: 'Password changed successfully.',
+    });
+  } catch (err) {
+    return respondWithFirebaseError(res, err);
+  }
+}
+
+module.exports = { listUsers, createUser, updateUser, setUserEnabled, changeOwnPassword };
