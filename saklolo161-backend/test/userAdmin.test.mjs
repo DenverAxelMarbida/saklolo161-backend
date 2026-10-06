@@ -14,6 +14,8 @@
  * (via createRequire) and restore them in afterAll():
  *   - authService.verifyToken  → decodes the fake admin/dispatcher
  *     tokens (verifyAuth itself still runs for real).
+ *   - authService.verifyPassword → stubs the current-password
+ *     re-verification for the self-service change flow.
  *   - config/firebase.getFirebaseAuth → returns the mocked auth
  *     object used by userService.
  * The 401/403 boundary is therefore exercised end-to-end through
@@ -34,6 +36,7 @@ const authServiceNative = nativeRequire('../services/authService.js');
 const firebaseNative = nativeRequire('../config/firebase.js');
 
 const originalVerifyToken = authServiceNative.verifyToken;
+const originalVerifyPassword = authServiceNative.verifyPassword;
 const originalGetFirebaseAuth = firebaseNative.getFirebaseAuth;
 
 const mockAuth = {
@@ -74,13 +77,21 @@ beforeAll(() => {
     throw new Error('Invalid or expired token.');
   });
 
+  // Current-password re-verification for POST /api/users/me/password —
+  // default "correct"; individual tests override with mockResolvedValueOnce.
+  authServiceNative.verifyPassword = vi.fn(async () => true);
+
   firebaseNative.getFirebaseAuth = () => mockAuth;
 });
 
 afterAll(() => {
   authServiceNative.verifyToken = originalVerifyToken;
+  authServiceNative.verifyPassword = originalVerifyPassword;
   firebaseNative.getFirebaseAuth = originalGetFirebaseAuth;
 });
+
+// Valid against the shared password policy (16+, upper/lower/digit/special).
+const STRONG_PASSWORD = 'Str0ngPass!xK9pQ2';
 
 // Two provisioned Firebase users as listUsers() would return them:
 // claims attached, no passwords (Firebase never returns those).
@@ -133,6 +144,10 @@ beforeEach(() => {
     recordFor(uid).customClaims = { ...claims };
   });
   mockAuth.revokeRefreshTokens.mockResolvedValue(undefined);
+
+  // Reset any per-test override (incl. lingering mockResolvedValueOnce).
+  authServiceNative.verifyPassword.mockReset();
+  authServiceNative.verifyPassword.mockResolvedValue(true);
 });
 
 describe('GET /api/users — auth boundary', () => {
@@ -211,7 +226,7 @@ describe('GET /api/users — payload shape', () => {
 describe('POST /api/users — validation', () => {
   const validBody = {
     email: 'new@marikina.gov.ph',
-    password: 'secret123',
+    password: STRONG_PASSWORD,
     agency: 'FLOOD',
     role: 'dispatcher',
   };
@@ -265,7 +280,7 @@ describe('POST /api/users — validation', () => {
 describe('POST /api/users — creation', () => {
   const validBody = {
     email: 'new@marikina.gov.ph',
-    password: 'secret123',
+    password: STRONG_PASSWORD,
     agency: 'FLOOD',
     role: 'dispatcher',
   };
@@ -280,7 +295,7 @@ describe('POST /api/users — creation', () => {
     expect(mockAuth.createUser).toHaveBeenCalledTimes(1);
     expect(mockAuth.createUser).toHaveBeenCalledWith({
       email: 'new@marikina.gov.ph',
-      password: 'secret123',
+      password: STRONG_PASSWORD,
     });
   });
 
@@ -305,7 +320,7 @@ describe('POST /api/users — creation', () => {
       .send(validBody);
     expect(res.status).toBe(201);
     const raw = JSON.stringify(res.body);
-    expect(raw).not.toContain('secret123');
+    expect(raw).not.toContain(STRONG_PASSWORD);
     expect(raw).not.toMatch(/password/i);
   });
 
@@ -447,5 +462,255 @@ describe('DELETE /api/users/:uid', () => {
     expect(res.status).toBe(404);
     expect(res.body.success).toBe(false);
     expect(mockAuth.deleteUser).toBeUndefined();
+  });
+});
+
+describe('POST /api/users — password policy', () => {
+  const baseBody = {
+    email: 'new@marikina.gov.ph',
+    password: STRONG_PASSWORD,
+    agency: 'FLOOD',
+    role: 'dispatcher',
+  };
+
+  it('rejects a weak password with 400 before touching Firebase', async () => {
+    const res = await request(app)
+      .post('/api/users')
+      .set(adminAuth)
+      .send({ ...baseBody, password: 'secret123' });
+    expect(res.status).toBe(400);
+    expect(res.body.success).toBe(false);
+    expect(res.body.message).toMatch(/16 characters/);
+    expect(mockAuth.createUser).not.toHaveBeenCalled();
+    expect(mockAuth.setCustomUserClaims).not.toHaveBeenCalled();
+  });
+
+  it('rejects a password missing any single complexity rule', async () => {
+    const cases = [
+      'AAAAAAA1!AAAAAAAA', // no lowercase
+      'aaaaaaa1!aaaaaaaa', // no uppercase
+      'Abc!Abc!Abc!Abc!A', // no number
+      'Abc1Abc1Abc1Abc1A', // no special
+    ];
+    for (const password of cases) {
+      const res = await request(app)
+        .post('/api/users')
+        .set(adminAuth)
+        .send({ ...baseBody, password });
+      expect(res.status).toBe(400);
+      expect(res.body.success).toBe(false);
+      expect(mockAuth.createUser).not.toHaveBeenCalled();
+    }
+  });
+
+  it('accepts a policy-valid password and creates the account', async () => {
+    const res = await request(app)
+      .post('/api/users')
+      .set(adminAuth)
+      .send(baseBody);
+    expect(res.status).toBe(201);
+    expect(mockAuth.createUser).toHaveBeenCalledWith({
+      email: 'new@marikina.gov.ph',
+      password: STRONG_PASSWORD,
+    });
+  });
+
+  it('never logs the password on create success or policy rejection', async () => {
+    const logSpy = vi.spyOn(console, 'log');
+    const errorSpy = vi.spyOn(console, 'error');
+    const warnSpy = vi.spyOn(console, 'warn');
+
+    await request(app).post('/api/users').set(adminAuth).send(baseBody);
+    await request(app)
+      .post('/api/users')
+      .set(adminAuth)
+      .send({ ...baseBody, password: 'secret123' });
+
+    const logged = [...logSpy.mock.calls, ...errorSpy.mock.calls, ...warnSpy.mock.calls]
+      .flat()
+      .map((arg) => String(arg))
+      .join(' ');
+    logSpy.mockRestore();
+    errorSpy.mockRestore();
+    warnSpy.mockRestore();
+
+    expect(logged).not.toContain(STRONG_PASSWORD);
+    expect(logged).not.toContain('secret123');
+  });
+});
+
+describe('PATCH /api/users/:uid — password fields are not accepted', () => {
+  it('never forwards a password to Firebase (no arbitrary admin password reset)', async () => {
+    const res = await request(app)
+      .patch('/api/users/uid-fire')
+      .set(adminAuth)
+      .send({ email: 'renamed@marikina.gov.ph', password: 'SomeOther!Pass99' });
+    expect(res.status).toBe(200);
+    expect(mockAuth.updateUser).toHaveBeenCalled();
+    for (const [, changes] of mockAuth.updateUser.mock.calls) {
+      expect(changes).not.toHaveProperty('password');
+    }
+  });
+});
+
+describe('POST /api/users/me/password — self-service change', () => {
+  const CHANGE_BODY = {
+    currentPassword: 'OldPass!xK9pQ2v3',
+    newPassword: 'N3wSecure!Passw0rd!',
+    confirmNewPassword: 'N3wSecure!Passw0rd!',
+  };
+
+  it('returns 401 when no token is provided', async () => {
+    const res = await request(app)
+      .post('/api/users/me/password')
+      .send(CHANGE_BODY);
+    expect(res.status).toBe(401);
+    expect(res.body.success).toBe(false);
+  });
+
+  it('returns 401 for an invalid token', async () => {
+    const res = await request(app)
+      .post('/api/users/me/password')
+      .set({ Authorization: 'Bearer garbage-token' })
+      .send(CHANGE_BODY);
+    expect(res.status).toBe(401);
+    expect(authServiceNative.verifyPassword).not.toHaveBeenCalled();
+  });
+
+  it('allows an authenticated dispatcher (no admin required)', async () => {
+    const res = await request(app)
+      .post('/api/users/me/password')
+      .set(dispatcherAuth)
+      .send(CHANGE_BODY);
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+  });
+
+  it('allows an authenticated admin', async () => {
+    const res = await request(app)
+      .post('/api/users/me/password')
+      .set(adminAuth)
+      .send(CHANGE_BODY);
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+  });
+
+  it('rejects a weak new password with 400 before re-verification', async () => {
+    const res = await request(app)
+      .post('/api/users/me/password')
+      .set(adminAuth)
+      .send({ ...CHANGE_BODY, newPassword: 'short1!', confirmNewPassword: 'short1!' });
+    expect(res.status).toBe(400);
+    expect(res.body.success).toBe(false);
+    expect(res.body.message).toMatch(/16 characters/);
+    expect(authServiceNative.verifyPassword).not.toHaveBeenCalled();
+    expect(mockAuth.updateUser).not.toHaveBeenCalled();
+  });
+
+  it('rejects a confirmation mismatch with 400', async () => {
+    const res = await request(app)
+      .post('/api/users/me/password')
+      .set(adminAuth)
+      .send({ ...CHANGE_BODY, confirmNewPassword: 'Different!Pass123' });
+    expect(res.status).toBe(400);
+    expect(res.body.success).toBe(false);
+    expect(authServiceNative.verifyPassword).not.toHaveBeenCalled();
+    expect(mockAuth.updateUser).not.toHaveBeenCalled();
+  });
+
+  it('rejects a missing current password with 400', async () => {
+    const res = await request(app)
+      .post('/api/users/me/password')
+      .set(adminAuth)
+      .send({ ...CHANGE_BODY, currentPassword: '' });
+    expect(res.status).toBe(400);
+    expect(res.body.success).toBe(false);
+    expect(mockAuth.updateUser).not.toHaveBeenCalled();
+  });
+
+  it('rejects a new password equal to the current one with 400', async () => {
+    const res = await request(app)
+      .post('/api/users/me/password')
+      .set(adminAuth)
+      .send({
+        currentPassword: STRONG_PASSWORD,
+        newPassword: STRONG_PASSWORD,
+        confirmNewPassword: STRONG_PASSWORD,
+      });
+    expect(res.status).toBe(400);
+    expect(res.body.success).toBe(false);
+    expect(res.body.message).toMatch(/different from the current password/);
+    expect(authServiceNative.verifyPassword).not.toHaveBeenCalled();
+    expect(mockAuth.updateUser).not.toHaveBeenCalled();
+  });
+
+  it('rejects an incorrect current password without touching Firebase Auth users', async () => {
+    authServiceNative.verifyPassword.mockResolvedValueOnce(false);
+
+    const res = await request(app)
+      .post('/api/users/me/password')
+      .set(adminAuth)
+      .send(CHANGE_BODY);
+
+    expect(res.status).toBe(400);
+    expect(res.body.success).toBe(false);
+    expect(res.body.message).toMatch(/current password/i);
+    expect(mockAuth.updateUser).not.toHaveBeenCalled();
+  });
+
+  it('re-verifies the current password for the token user, then updates that uid via Firebase', async () => {
+    const res = await request(app)
+      .post('/api/users/me/password')
+      .set(dispatcherAuth)
+      .send(CHANGE_BODY);
+
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+
+    // Re-authentication: own email + the supplied current password.
+    expect(authServiceNative.verifyPassword).toHaveBeenCalledTimes(1);
+    expect(authServiceNative.verifyPassword).toHaveBeenCalledWith(
+      'fire@marikina.gov.ph',
+      'OldPass!xK9pQ2v3',
+    );
+
+    // Password update: the TOKEN's uid only — never a client-supplied one.
+    expect(mockAuth.updateUser).toHaveBeenCalledTimes(1);
+    expect(mockAuth.updateUser).toHaveBeenCalledWith('uid-fire', {
+      password: 'N3wSecure!Passw0rd!',
+    });
+  });
+
+  it('never returns any password in the response', async () => {
+    const res = await request(app)
+      .post('/api/users/me/password')
+      .set(adminAuth)
+      .send(CHANGE_BODY);
+    expect(res.status).toBe(200);
+    const raw = JSON.stringify(res.body);
+    expect(raw).not.toContain(CHANGE_BODY.currentPassword);
+    expect(raw).not.toContain(CHANGE_BODY.newPassword);
+    expect(raw).not.toMatch(/currentPassword|newPassword|confirmNewPassword/);
+  });
+
+  it("cannot change another user's password — uid and email come from the token, not the body", async () => {
+    const res = await request(app)
+      .post('/api/users/me/password')
+      .set(adminAuth)
+      .send({
+        ...CHANGE_BODY,
+        uid: 'uid-fire',
+        email: 'fire@marikina.gov.ph',
+      });
+
+    expect(res.status).toBe(200);
+    // The victim uid from the body is never used.
+    for (const [uid] of mockAuth.updateUser.mock.calls) {
+      expect(uid).toBe('uid-admin');
+    }
+    expect(authServiceNative.verifyPassword).toHaveBeenCalledWith(
+      'admin@marikina.gov.ph',
+      CHANGE_BODY.currentPassword,
+    );
   });
 });

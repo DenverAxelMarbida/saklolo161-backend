@@ -140,6 +140,21 @@ async function setUserEnabled(uid, enabled) {
   return mapUser(record);
 }
 
+/**
+ * Sets a user's login password (self-service change flow). The new
+ * password goes directly to Firebase Admin updateUser() and is
+ * never stored, logged, or returned by this process.
+ *
+ * @param {string} uid
+ * @param {string} password already policy-validated by the caller
+ * @returns {Promise<void>}
+ * @throws Firebase auth/user-not-found (→ 404) for unknown uids
+ */
+async function setPassword(uid, password) {
+  const auth = firebaseAuth();
+  await auth.updateUser(uid, { password });
+}
+
 module.exports = {
   VALID_AGENCIES,
   VALID_ROLES,
@@ -147,4 +162,5 @@ module.exports = {
   createUser,
   updateUser,
   setUserEnabled,
+  setPassword,
 };

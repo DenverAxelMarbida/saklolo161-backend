@@ -109,4 +109,46 @@ async function verifyToken(token) {
   return buildPayload(decoded);
 }
 
-module.exports = { login, verifyToken };
+/**
+ * Verifies that `password` is the CURRENT password for `email`
+ * against Firebase Auth (Auth REST `accounts:signInWithPassword` —
+ * the exact credential check `reauthenticateWithCredential` performs
+ * client-side). Used by the self-service change-password flow to
+ * honor Firebase's recent-authentication requirement without ever
+ * bypassing it: the caller proves the current password first, then
+ * the Admin SDK applies the new one.
+ *
+ * Additive export — `login`/`verifyToken` contracts untouched.
+ *
+ * @param {string} email
+ * @param {string} password
+ * @returns {Promise<boolean>} true when the credentials are valid.
+ * @throws When the API key is missing/unconfigured or the Auth
+ *         service is unreachable (5xx/network) — the caller maps
+ *         this to a generic 500, never to "wrong password".
+ */
+async function verifyPassword(email, password) {
+  if (!FIREBASE_WEB_API_KEY) {
+    throw new Error(
+      'Firebase Auth verification is not configured (missing FIREBASE_WEB_API_KEY).'
+    );
+  }
+
+  try {
+    await axios.post(
+      `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${FIREBASE_WEB_API_KEY}`,
+      { email, password, returnSecureToken: true },
+      { timeout: AUTH_REST_TIMEOUT_MS }
+    );
+    return true;
+  } catch (err) {
+    const status = err.response && err.response.status;
+    if (status >= 400 && status < 500) {
+      // Wrong email/password (or disabled account) — false, never leaked.
+      return false;
+    }
+    throw new Error('Authentication service unavailable.');
+  }
+}
+
+module.exports = { login, verifyToken, verifyPassword };

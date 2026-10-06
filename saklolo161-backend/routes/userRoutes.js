@@ -1,9 +1,13 @@
 /**
  * routes/userRoutes.js
  * --------------------------------------------------------------
- * Admin user-management endpoints. Every route runs verifyAuth
- * first (authentication → req.user), then requireAdmin
- * (authorization → 403 for non-admins).
+ * User-management endpoints. Two auth tiers:
+ *
+ *   - POST /me/password → verifyAuth ONLY. Any authenticated
+ *     dispatcher or admin may change their OWN password (uid comes
+ *     from the token — never the body). No requireAdmin here.
+ *   - Everything else → verifyAuth + requireAdmin (403 for
+ *     non-admins).
  *
  * Intentionally NO DELETE route: accounts are disabled (PATCH
  * /:uid/status), never deleted, so attribution survives.
@@ -21,7 +25,11 @@ const {
   createUser,
   updateUser,
   setUserEnabled,
+  changeOwnPassword,
 } = require('../controllers/userController');
+
+// POST /api/users/me/password - change own password (any authenticated user)
+router.post('/me/password', verifyAuth, changeOwnPassword);
 
 // GET /api/users - list all accounts (admin only)
 router.get('/', verifyAuth, requireAdmin, listUsers);
