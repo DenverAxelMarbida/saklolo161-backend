@@ -288,6 +288,48 @@ describe('GET /api/incidents/:id', () => {
   });
 });
 
+describe('PATCH /api/incidents/:id/status — resolvedAt persistence', () => {
+  let incidentId;
+
+  beforeEach(async () => {
+    const created = await request(app)
+      .post('/api/incidents')
+      // Unique phone: the public create endpoint rate-limits to 3 reports
+      // per phone per 10-minute window, and the suite's other creates
+      // already share the default makeIncident() phone.
+      .send({ ...makeIncident('Flood'), citizenPhone: '+639121987664' });
+    incidentId = created.body.data.incidentId;
+  });
+
+  it('stores resolvedAt so every later read carries the same server timestamp', async () => {
+    const token = await loginAs('flood');
+    const patch = await request(app)
+      .patch(`/api/incidents/${incidentId}/status`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ status: 'Resolved' });
+    expect(patch.status).toBe(200);
+    expect(patch.body.data.resolvedAt).toBeTruthy();
+    expect(Number.isNaN(Date.parse(patch.body.data.resolvedAt))).toBe(false);
+
+    // The regression this pins: the controller used to stamp resolvedAt
+    // on the RESPONSE object only — the store never kept it, so every
+    // subsequent read (web Resolved Log via GET list, mobile History via
+    // GET :id) returned the incident WITHOUT a resolution time.
+    const detail = await request(app).get(`/api/incidents/${incidentId}`);
+    expect(detail.status).toBe(200);
+    expect(detail.body.data.resolvedAt).toBe(patch.body.data.resolvedAt);
+
+    // The dispatcher list endpoint (what the web dashboard polls).
+    const list = await request(app)
+      .get('/api/incidents')
+      .set('Authorization', `Bearer ${token}`);
+    expect(list.status).toBe(200);
+    const row = list.body.data.find((i) => i.incidentId === incidentId);
+    expect(row).toBeTruthy();
+    expect(row.resolvedAt).toBe(patch.body.data.resolvedAt);
+  });
+});
+
 describe('dispatch → station anchor', () => {
   let incidentId;
 
