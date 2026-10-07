@@ -39,6 +39,12 @@ function ensureShape(incident) {
   if (!Number.isInteger(incident.evidenceFailedCount) || incident.evidenceFailedCount < 0) {
     incident.evidenceFailedCount = 0;
   }
+  if (!Number.isInteger(incident.evidenceAttempt) || incident.evidenceAttempt < 0) {
+    incident.evidenceAttempt = 0;
+  }
+  if (!Number.isInteger(incident.evidenceAttemptsTotal) || incident.evidenceAttemptsTotal < 0) {
+    incident.evidenceAttemptsTotal = 0;
+  }
   return incident;
 }
 

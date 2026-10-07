@@ -218,7 +218,13 @@ async function updateIncidentStatus(req, res, next) {
 async function updateEvidenceStatus(req, res, next) {
   try {
     const { id } = req.params;
-    const { evidenceUploading, evidenceExpectedCount, evidenceFailedCount } = req.body;
+    const {
+      evidenceUploading,
+      evidenceExpectedCount,
+      evidenceFailedCount,
+      evidenceAttempt,
+      evidenceAttemptsTotal,
+    } = req.body;
 
     const patch = {};
 
@@ -252,10 +258,31 @@ async function updateEvidenceStatus(req, res, next) {
       patch.evidenceFailedCount = evidenceFailedCount;
     }
 
+    if (evidenceAttempt !== undefined) {
+      if (!Number.isInteger(evidenceAttempt) || evidenceAttempt < 0) {
+        return res.status(400).json({
+          success: false,
+          message: 'evidenceAttempt must be a non-negative integer.',
+        });
+      }
+      patch.evidenceAttempt = evidenceAttempt;
+    }
+
+    if (evidenceAttemptsTotal !== undefined) {
+      if (!Number.isInteger(evidenceAttemptsTotal) || evidenceAttemptsTotal < 0) {
+        return res.status(400).json({
+          success: false,
+          message: 'evidenceAttemptsTotal must be a non-negative integer.',
+        });
+      }
+      patch.evidenceAttemptsTotal = evidenceAttemptsTotal;
+    }
+
     if (Object.keys(patch).length === 0) {
       return res.status(400).json({
         success: false,
-        message: 'Provide at least one of: evidenceUploading, evidenceExpectedCount, evidenceFailedCount.',
+        message:
+          'Provide at least one of: evidenceUploading, evidenceExpectedCount, evidenceFailedCount, evidenceAttempt, evidenceAttemptsTotal.',
       });
     }
 

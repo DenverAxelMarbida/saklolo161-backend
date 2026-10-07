@@ -153,6 +153,8 @@ describe('POST /api/incidents', () => {
     expect(res.body.data.evidenceUploading).toBe(false);
     expect(res.body.data.evidenceExpectedCount).toBe(0);
     expect(res.body.data.evidenceFailedCount).toBe(0);
+    expect(res.body.data.evidenceAttempt).toBe(0);
+    expect(res.body.data.evidenceAttemptsTotal).toBe(0);
   });
 
   it('flips evidenceUploading on when the client declares an expected attachment count', async () => {
@@ -207,6 +209,29 @@ describe('POST /api/incidents/:id/evidence-status', () => {
       .send({ evidenceFailedCount: -1 });
     expect(res.status).toBe(400);
     expect(res.body.success).toBe(false);
+  });
+
+  it('accepts and round-trips retry attempt progress', async () => {
+    const res = await request(app)
+      .post(`/api/incidents/${incidentId}/evidence-status`)
+      .send({ evidenceUploading: true, evidenceAttempt: 2, evidenceAttemptsTotal: 3 });
+    expect(res.status).toBe(200);
+    expect(res.body.data.evidenceAttempt).toBe(2);
+    expect(res.body.data.evidenceAttemptsTotal).toBe(3);
+
+    const detail = await request(app).get(`/api/incidents/${incidentId}`);
+    expect(detail.body.data.evidenceAttempt).toBe(2);
+    expect(detail.body.data.evidenceAttemptsTotal).toBe(3);
+  });
+
+  it('400s for a non-integer or negative attempt', async () => {
+    for (const body of [{ evidenceAttempt: 1.5 }, { evidenceAttemptsTotal: -1 }]) {
+      const res = await request(app)
+        .post(`/api/incidents/${incidentId}/evidence-status`)
+        .send(body);
+      expect(res.status).toBe(400);
+      expect(res.body.success).toBe(false);
+    }
   });
 
   it('400s when no progress field is provided', async () => {
