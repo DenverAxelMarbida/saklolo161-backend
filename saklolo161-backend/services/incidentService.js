@@ -107,21 +107,37 @@ async function findById(id) {
 /**
  * Sets an incident's status. Returns the updated incident, or
  * undefined when the incident does not exist.
+ *
+ * Resolving also PERSISTS `resolvedAt` (server ISO timestamp) on the
+ * incident itself. The old flow stamped it on the controller's response
+ * object only, so the store never kept it and every later read — web
+ * Resolved Log (GET list) and mobile History (GET :id) — returned the
+ * incident without a resolution time (the web rendered "N/A").
  * @param {string} id
  * @param {string} status
- * @returns {Promise<Object|undefined>}
+ * @returns {Promise<Object|undefined>} updated incident, or undefined if missing
  */
 async function updateStatus(id, status) {
+  const patch = { status };
+  if (status === 'Resolved') {
+    patch.resolvedAt = new Date().toISOString();
+  }
   const db = getDb();
 
   if (db) {
     // ---- PHASE 3: real Firebase Realtime Database write ----
-    await db.ref(`incidents/${id}/status`).set(status);
+    await db.ref(`incidents/${id}`).update(patch);
     return findById(id);
   }
 
   // ---- PHASE 2: in-memory mock fallback ----
-  return ensureShape(mockIncidents.updateStatus(id, status));
+  const incident = ensureShape(mockIncidents.updateStatus(id, status));
+  if (incident && patch.resolvedAt !== undefined) {
+    // The mock store returns its own stored reference, so this mutation
+    // persists in place (same aliasing attachDispatch relies on).
+    incident.resolvedAt = patch.resolvedAt;
+  }
+  return incident;
 }
 
 /**

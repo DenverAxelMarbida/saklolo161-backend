@@ -185,7 +185,12 @@ async function updateIncidentStatus(req, res, next) {
 
     const updated = await incidentService.updateStatus(id, status);
 
-    if (status === 'Resolved') {
+    // incidentService.updateStatus() persists resolvedAt on Resolved, so
+    // the re-read record below normally already carries it. The fallback
+    // only covers the (defensive) case where it somehow didn't — it must
+    // never OVERWRITE the stored timestamp, or the response would disagree
+    // with every subsequent GET.
+    if (status === 'Resolved' && !updated.resolvedAt) {
       updated.resolvedAt = new Date().toISOString();
     }
 
