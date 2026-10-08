@@ -39,26 +39,26 @@ import './blank-mapbox.mjs';
 // instead of riding out an 8s network timeout past vitest's 5s.
 import './blank-pagasa.mjs';
 
-// And for Semaphore: force SEMAPHORE_API_KEY empty before config/env.js
+// And for TextBee: force TEXTBEE_API_KEY empty before config/env.js
 // loads, so no app-level test path (incident create / dispatch / status)
 // can ever reach the real SMS API.
-import './blank-semaphore.mjs';
+import './blank-textbee.mjs';
 
 import app from '../server.js';
 import routingService from '../services/routingService.js';
-import semaphoreService from '../services/semaphoreService.js';
+import textbeeService from '../services/textbeeService.js';
 import { createRequire } from 'node:module';
 
 // sendSms() reads config/env through CommonJS `require`, which lands in
 // Node's require cache — a DIFFERENT module instance from a vitest ESM
 // `import env from`. Grab the shared instance here so these tests can
-// actually flip SEMAPHORE_API_KEY on the object the service reads.
+// actually flip TEXTBEE_API_KEY on the object the service reads.
 const env = createRequire(import.meta.url)('../config/env.js');
 
 const MOCK_PASSWORD = 'changeme123';
 
-// sendSms() must NEVER reject — it warns instead when SEMAPHORE_API_KEY is
-// missing, which is the suite's default state thanks to blank-semaphore.mjs
+// sendSms() must NEVER reject — it warns instead when TEXTBEE_API_KEY is
+// missing, which is the suite's default state thanks to blank-textbee.mjs
 // and would otherwise spam every incident/dispatch test. Silence console.warn
 // globally; the missing-key test below asserts on warnSpy.
 const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -385,16 +385,18 @@ describe('dispatch → station anchor', () => {
     );
 
     // Stub fetch + configure a throwaway key so sendSms() actually
-    // builds the Semaphore request — the assertion below inspects the
+    // builds the TextBee request — the assertion below inspects the
     // request body instead of the old "[MOCK SMS]" console line, and
     // no network call leaves the process.
     const fetchSpy = vi.fn(async () => ({
       ok: true,
       status: 200,
-      json: async () => ({ status: 'success', count: 1 }),
+      json: async () => ({
+        data: { success: true, message: 'SMS added to queue for processing', smsBatchId: 'test-batch', recipientCount: 1 },
+      }),
     }));
     vi.stubGlobal('fetch', fetchSpy);
-    env.SEMAPHORE_API_KEY = 'test-key-contract-suite';
+    env.TEXTBEE_API_KEY = 'test-key-contract-suite';
     try {
       const res = await request(app)
         .post('/api/incidents/dispatch')
@@ -412,17 +414,17 @@ describe('dispatch → station anchor', () => {
 
       expect(fetchSpy).toHaveBeenCalled();
       const [url, init] = fetchSpy.mock.calls[0];
-      expect(url).toBe('https://api.semaphore.co/api/v4/messages');
+      expect(url).toBe('https://api.textbee.dev/api/v1/gateway/send-sms');
       expect(init.method).toBe('POST');
 
       const smsBodies = fetchSpy.mock.calls.map((call) => JSON.parse(call[1].body));
-      const citizenSms = smsBodies.find((b) => b.number === '+639121987654');
+      const citizenSms = smsBodies.find((b) => b.recipients.includes('+639121987654'));
       expect(citizenSms).toBeTruthy();
       expect(citizenSms.message).toContain(`Arrival ETA: ~${expectedMin} min`);
       expect(citizenSms.message).not.toContain('ETA: 2–5 mins');
     } finally {
       vi.unstubAllGlobals();
-      env.SEMAPHORE_API_KEY = '';
+      env.TEXTBEE_API_KEY = '';
     }
   });
 });
@@ -499,9 +501,19 @@ describe('POST /api/incidents/:id/evidence', () => {
   });
 });
 
-describe('sendSms (Semaphore)', () => {
-  const ORIGINAL_KEY = env.SEMAPHORE_API_KEY;
+describe('sendSms (TextBee)', () => {
+  const ORIGINAL_KEY = env.TEXTBEE_API_KEY;
   const TEST_KEY = 'test-key-contract-suite';
+  const TEXTBEE_URL = 'https://api.textbee.dev/api/v1/gateway/send-sms';
+  const TEXTBEE_BODY = { recipients: ['+639171234567'], message: 'Help is on the way.' };
+  const TEXTBEE_SUCCESS = {
+    data: {
+      success: true,
+      message: 'SMS added to queue for processing',
+      smsBatchId: '66b1f2c3a4d5e6f7a8b9c0d2',
+      recipientCount: 1,
+    },
+  };
   let fetchSpy;
   let errorSpy;
 
@@ -512,19 +524,19 @@ describe('sendSms (Semaphore)', () => {
     errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     fetchSpy = vi.fn();
     vi.stubGlobal('fetch', fetchSpy);
-    env.SEMAPHORE_API_KEY = TEST_KEY;
+    env.TEXTBEE_API_KEY = TEST_KEY;
   });
 
   afterEach(() => {
     errorSpy.mockRestore();
     vi.unstubAllGlobals();
-    env.SEMAPHORE_API_KEY = ORIGINAL_KEY;
+    env.TEXTBEE_API_KEY = ORIGINAL_KEY;
   });
 
   it('skips without calling fetch when the API key is missing', async () => {
-    env.SEMAPHORE_API_KEY = '';
+    env.TEXTBEE_API_KEY = '';
 
-    const result = await semaphoreService.sendSms('+639171234567', 'Help is on the way.');
+    const result = await textbeeService.sendSms('+639171234567', 'Help is on the way.');
 
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(result.success).toBe(false);
@@ -536,56 +548,115 @@ describe('sendSms (Semaphore)', () => {
     expect(JSON.stringify(result)).not.toContain(TEST_KEY);
   });
 
-  it('POSTs the expected payload to the Semaphore endpoint on success', async () => {
+  it('POSTs the expected payload to the TextBee endpoint on success', async () => {
     fetchSpy.mockResolvedValue({
       ok: true,
       status: 200,
-      json: async () => ({ status: 'success', count: 1 }),
+      json: async () => TEXTBEE_SUCCESS,
     });
 
-    const result = await semaphoreService.sendSms('+639171234567', 'Help is on the way.');
+    const result = await textbeeService.sendSms('+639171234567', 'Help is on the way.');
 
     expect(fetchSpy).toHaveBeenCalledTimes(1);
     const [url, init] = fetchSpy.mock.calls[0];
-    expect(url).toBe('https://api.semaphore.co/api/v4/messages');
+    expect(url).toBe(TEXTBEE_URL);
     expect(init.method).toBe('POST');
     expect(init.headers['Content-Type']).toBe('application/json');
+    // TextBee auth: the key travels in the x-api-key HEADER only…
+    expect(init.headers['x-api-key']).toBe(TEST_KEY);
+    // …and must never appear in the JSON body (which is sent in clear).
+    const sentBody = JSON.parse(init.body);
+    expect(init.body).not.toContain(TEST_KEY);
     // Request budget: AbortSignal.timeout() must be attached (Node 20).
     expect(init.signal).toBeInstanceOf(AbortSignal);
-    expect(JSON.parse(init.body)).toEqual({
-      apikey: TEST_KEY,
-      number: '+639171234567',
-      message: 'Help is on the way.',
-      sendername: env.SEMAPHORE_SENDER_NAME,
-    });
+    // Body contract: recipients array + message, no sendername, no deviceId
+    // unless TEXTBEE_DEVICE_ID is configured (it isn't here).
+    expect(sentBody).toEqual(TEXTBEE_BODY);
+    expect(sentBody).not.toHaveProperty('apikey');
+    expect(sentBody).not.toHaveProperty('sendername');
+    expect(sentBody).not.toHaveProperty('deviceId');
 
     expect(result.success).toBe(true);
     expect(result.mock).toBe(false);
-    expect(result.data).toEqual({ status: 'success', count: 1 });
+    expect(result.data).toEqual(TEXTBEE_SUCCESS);
     expect(JSON.stringify(result)).not.toContain(TEST_KEY);
   });
 
-  it('resolves safely on a non-2xx Semaphore response', async () => {
+  it('parses TextBee\'s nested success response ({ data: { success, smsBatchId } })', async () => {
+    fetchSpy.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => TEXTBEE_SUCCESS,
+    });
+
+    const result = await textbeeService.sendSms('+639171234567', 'Help is on the way.');
+
+    expect(result.success).toBe(true);
+    // 200 from TextBee means accepted/queued — not guaranteed delivery.
+    // result.data is the raw parsed body, which nests success under `data`.
+    expect(result.data.data.success).toBe(true);
+    expect(result.data.data.smsBatchId).toBe('66b1f2c3a4d5e6f7a8b9c0d2');
+    expect(result.data.data.recipientCount).toBe(1);
+  });
+
+  it('includes deviceId in the body only when TEXTBEE_DEVICE_ID is set', async () => {
+    fetchSpy.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => TEXTBEE_SUCCESS,
+    });
+    env.TEXTBEE_DEVICE_ID = 'device-123';
+
+    try {
+      await textbeeService.sendSms('+639171234567', 'Help is on the way.');
+      const sentBody = JSON.parse(fetchSpy.mock.calls[0][1].body);
+      expect(sentBody.deviceId).toBe('device-123');
+      expect(sentBody.recipients).toEqual(['+639171234567']);
+    } finally {
+      env.TEXTBEE_DEVICE_ID = '';
+    }
+  });
+
+  it('resolves safely on a non-2xx TextBee response (400 — no online device)', async () => {
     fetchSpy.mockResolvedValue({
       ok: false,
       status: 400,
-      json: async () => ({ message: 'Invalid number' }),
+      json: async () => ({ message: 'No enabled device to send from' }),
     });
 
     // Awaiting directly is the assertion: sendSms() must resolve, never reject.
-    const result = await semaphoreService.sendSms('161', 'DISPATCH alert');
+    const result = await textbeeService.sendSms('161', 'DISPATCH alert');
     expect(result).toBeDefined();
 
     expect(result.success).toBe(false);
     expect(result.mock).toBe(false);
     expect(result.message).toContain('400');
+    expect(result.error.status).toBe(400);
+  });
+
+  it('resolves safely on a 401 (missing/invalid/revoked API key)', async () => {
+    fetchSpy.mockResolvedValue({
+      ok: false,
+      status: 401,
+      json: async () => ({ message: 'Unauthorized' }),
+    });
+
+    // Awaiting directly is the assertion: sendSms() must resolve, never reject.
+    const result = await textbeeService.sendSms('+639171234567', 'Help is on the way.');
+    expect(result).toBeDefined();
+
+    expect(result.success).toBe(false);
+    expect(result.mock).toBe(false);
+    expect(result.message).toContain('401');
+    expect(result.error.status).toBe(401);
+    expect(JSON.stringify(result)).not.toContain(TEST_KEY);
   });
 
   it('resolves safely on a network/fetch failure', async () => {
     fetchSpy.mockRejectedValue(new Error('network down'));
 
     // Awaiting directly is the assertion: sendSms() must resolve, never reject.
-    const result = await semaphoreService.sendSms('+639171234567', 'Help is on the way.');
+    const result = await textbeeService.sendSms('+639171234567', 'Help is on the way.');
     expect(result).toBeDefined();
 
     expect(result.success).toBe(false);
@@ -599,7 +670,7 @@ describe('sendSms (Semaphore)', () => {
     fetchSpy.mockRejectedValue(timeoutError);
 
     // Awaiting directly is the assertion: sendSms() must resolve, never reject.
-    const result = await semaphoreService.sendSms('+639171234567', 'Help is on the way.');
+    const result = await textbeeService.sendSms('+639171234567', 'Help is on the way.');
     expect(result).toBeDefined();
 
     expect(result.success).toBe(false);
@@ -617,7 +688,7 @@ describe('sendSms (Semaphore)', () => {
     });
 
     // Awaiting directly is the assertion: sendSms() must resolve, never reject.
-    const result = await semaphoreService.sendSms('+639171234567', 'Help is on the way.');
+    const result = await textbeeService.sendSms('+639171234567', 'Help is on the way.');
     expect(result).toBeDefined();
 
     expect(result.success).toBe(false);

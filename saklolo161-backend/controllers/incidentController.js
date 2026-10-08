@@ -3,13 +3,13 @@
  * --------------------------------------------------------------
  * Handles the business logic for incident-related requests.
  * Talks to /services/incidentService.js (Phase 2) and /services
- * (Mapbox, Semaphore) — routes stay thin and just point here.
+ * (Mapbox, TextBee SMS) — routes stay thin and just point here.
  * --------------------------------------------------------------
  */
 
 const incidentService = require('../services/incidentService');
 const mapboxService = require('../services/mapboxService');
-const semaphoreService = require('../services/semaphoreService');
+const textbeeService = require('../services/textbeeService');
 
 const VALID_STATUSES = ['Pending', 'Dispatched', 'En Route', 'Resolved'];
 
@@ -78,8 +78,8 @@ async function createIncident(req, res, next) {
 
     await incidentService.add(newIncident);
 
-    // Fire-and-forget confirmation SMS to the citizen (mocked in Phase 1).
-    semaphoreService.sendSms(
+    // Fire-and-forget confirmation SMS to the citizen (TextBee).
+    textbeeService.sendSms(
       citizenPhone,
       `Saklolo 161: Your ${category} report (${newIncident.incidentId}) has been received. Help is on the way.`
     );
@@ -194,8 +194,8 @@ async function updateIncidentStatus(req, res, next) {
       updated.resolvedAt = new Date().toISOString();
     }
 
-    // Notify the citizen of the status change (mocked in Phase 1).
-    await semaphoreService.sendSms(
+    // Notify the citizen of the status change (TextBee).
+    await textbeeService.sendSms(
       updated.citizenPhone,
       `Saklolo 161: Your incident ${updated.incidentId} status is now "${status}".`
     );
