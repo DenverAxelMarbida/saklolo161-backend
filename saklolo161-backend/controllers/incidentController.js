@@ -9,6 +9,7 @@
 
 const incidentService = require('../services/incidentService');
 const mapboxService = require('../services/mapboxService');
+const stationService = require('../services/stationService');
 const textbeeService = require('../services/textbeeService');
 
 const VALID_STATUSES = ['Pending', 'Dispatched', 'En Route', 'Resolved'];
@@ -158,6 +159,75 @@ async function getIncidentById(req, res, next) {
 }
 
 /**
+ * Resolves the ACTUAL responding station's display name for a status
+ * SMS. Priority: the contract's top-level `station` block (written at
+ * dispatch) → the `dispatch.stationName` copy → a live
+ * stationService lookup by `dispatch.stationId` → a neutral fallback.
+ * Never assumes or hardcodes an organization: if nothing is known
+ * about the responder, the SMS says so instead of naming one.
+ * (Controllers reach stations only through stationService — never
+ * config/stations.js directly.)
+ */
+async function resolveRespondingStationName(incident) {
+  if (incident.station && incident.station.name) {
+    return incident.station.name;
+  }
+  if (incident.dispatch && incident.dispatch.stationName) {
+    return incident.dispatch.stationName;
+  }
+  if (incident.dispatch && incident.dispatch.stationId) {
+    try {
+      const station = await stationService.getStationById(
+        incident.dispatch.stationId
+      );
+      if (station && station.name) return station.name;
+    } catch (error) {
+      console.error(
+        'incidentController: responding-station lookup failed:',
+        error.message
+      );
+    }
+  }
+  return 'Not yet assigned';
+}
+
+/**
+ * Builds the plain-text status-notification SMS. One template per
+ * outcome — INCIDENT RESOLVED for Resolved, otherwise STATUS UPDATE
+ * carrying the incident id, the new status, and the ACTUAL responding
+ * station (via resolveRespondingStationName). Triggers are unchanged:
+ * exactly one SMS per status change, as before.
+ */
+async function buildStatusSms(incident, status) {
+  if (status === 'Resolved') {
+    return [
+      'SAKLOLO 161',
+      'INCIDENT RESOLVED',
+      '',
+      `Incident: ${incident.incidentId}`,
+      'Status: Resolved',
+      '',
+      'Your emergency response has been completed.',
+      'Thank you for using Saklolo 161.',
+    ].join('\n');
+  }
+
+  const respondingFrom = await resolveRespondingStationName(incident);
+  return [
+    'SAKLOLO 161',
+    'STATUS UPDATE',
+    '',
+    `Incident: ${incident.incidentId}`,
+    `Status: ${status}`,
+    '',
+    'Responding from:',
+    respondingFrom,
+    '',
+    'Please keep your phone available for further updates.',
+  ].join('\n');
+}
+
+/**
  * PATCH /api/incidents/:id/status
  * Simulates the Pending -> Dispatched -> Resolved lifecycle.
  * The Admin Web Dashboard will call this when a dispatcher
@@ -194,11 +264,11 @@ async function updateIncidentStatus(req, res, next) {
       updated.resolvedAt = new Date().toISOString();
     }
 
-    // Notify the citizen of the status change (TextBee).
-    await textbeeService.sendSms(
-      updated.citizenPhone,
-      `Saklolo 161: Your incident ${updated.incidentId} status is now "${status}".`
-    );
+    // Notify the citizen of the status change (TextBee) — same single
+    // awaited trigger as before; buildStatusSms() picks the template
+    // and resolves the actual responding station (never a default).
+    const statusSms = await buildStatusSms(updated, status);
+    await textbeeService.sendSms(updated.citizenPhone, statusSms);
 
     return res.status(200).json({
       success: true,

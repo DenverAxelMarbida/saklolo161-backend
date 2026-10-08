@@ -429,6 +429,248 @@ describe('dispatch → station anchor', () => {
   });
 });
 
+describe('SMS notification content (TextBee request bodies)', () => {
+  // Message-construction coverage: verifies WHICH station the SMS
+  // names and the plain-text multi-line layouts. fetch is stubbed and
+  // a throwaway key is set, so no real SMS can ever leave the suite.
+  const TEST_KEY = 'test-key-contract-suite';
+  const ORIGINAL_KEY = env.TEXTBEE_API_KEY;
+
+  // Unique citizen phones — the public create endpoint rate-limits to
+  // 3 reports per phone per 10-minute window.
+  const MEDICAL_CITIZEN = '+639170001001';
+  const FLOOD_CITIZEN = '+639170001002';
+  const CDRRMO_CITIZEN = '+639170001003';
+  const STATUS_CITIZEN = '+639170001004';
+  const RESOLVED_CITIZEN = '+639170001005';
+  const UNASSIGNED_CITIZEN = '+639170001006';
+  const FAILING_CITIZEN = '+639170001007';
+
+  const CDRRMO = 'Marikina City Disaster Risk Reduction Management Office';
+  const ARMMC = 'Amang Rodriguez Memorial Medical Center';
+  const RIVER_COMMAND = 'River Park Authority';
+
+  let ids;
+  let fetchSpy;
+
+  beforeAll(async () => {
+    const create = async (category, citizenPhone) => {
+      const res = await request(app)
+        .post('/api/incidents')
+        .send({ ...makeIncident(category), citizenPhone });
+      expect(res.status).toBe(201);
+      return res.body.data.incidentId;
+    };
+    ids = {
+      armmc: await create('Medical', MEDICAL_CITIZEN),
+      flood: await create('Flood', FLOOD_CITIZEN),
+      cdrmo: await create('Medical', CDRRMO_CITIZEN),
+      statused: await create('Flood', STATUS_CITIZEN),
+      resolved: await create('Flood', RESOLVED_CITIZEN),
+      unassigned: await create('Flood', UNASSIGNED_CITIZEN),
+      failing: await create('Flood', FAILING_CITIZEN),
+    };
+  });
+
+  beforeEach(() => {
+    warnSpy.mockClear();
+    fetchSpy = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        data: {
+          success: true,
+          message: 'SMS added to queue for processing',
+          smsBatchId: 'test-batch',
+          recipientCount: 1,
+        },
+      }),
+    }));
+    vi.stubGlobal('fetch', fetchSpy);
+    env.TEXTBEE_API_KEY = TEST_KEY;
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    env.TEXTBEE_API_KEY = ORIGINAL_KEY;
+  });
+
+  const sentBodies = () =>
+    fetchSpy.mock.calls.map((call) => JSON.parse(call[1].body));
+  const messagesTo = (phone) =>
+    sentBodies()
+      .filter((b) => b.recipients.includes(phone))
+      .map((b) => b.message);
+  const allMessages = () => sentBodies().map((b) => b.message);
+
+  async function dispatchAs(token, incidentId, stationId, assignedUnit) {
+    const res = await request(app)
+      .post('/api/incidents/dispatch')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ incidentId, stationId, assignedUnit });
+    expect(res.status).toBe(200);
+    return res;
+  }
+
+  it('dispatch SMS names the ACTUAL selected station (ARMMC) in the new multi-line layout', async () => {
+    const token = await loginAs('medical');
+    await dispatchAs(token, ids.armmc, 'MEDICAL_ARMMC_ER', 'ARMMC ALS Ambulance #1');
+
+    const citizen = messagesTo(MEDICAL_CITIZEN);
+    expect(citizen).toHaveLength(1);
+    const msg = citizen[0];
+
+    // Actual responding station — not any assumed default.
+    expect(msg).toContain(
+      `Your emergency report has been dispatched to:\n${ARMMC}`
+    );
+    expect(msg).not.toContain(CDRRMO);
+
+    // Clean multi-line dispatch layout.
+    const lines = msg.split('\n');
+    expect(lines[0]).toBe('SAKLOLO 161');
+    expect(lines[1]).toBe('DISPATCH UPDATE');
+    expect(msg).toContain('Status: Dispatched');
+    expect(msg).toContain('Assigned unit: ARMMC ALS Ambulance #1');
+    expect(msg).toContain('Arrival ETA: ');
+    expect(msg).toContain('Please keep your phone available for further updates.');
+  });
+
+  it('station duty alert uses the clean multi-line dispatch layout with incident details', async () => {
+    const token = await loginAs('medical');
+    await dispatchAs(token, ids.armmc, 'MEDICAL_ARMMC_ER', 'ARMMC ALS Ambulance #1');
+
+    const alerts = allMessages().filter((m) =>
+      m.startsWith('SAKLOLO 161\nDISPATCH ALERT')
+    );
+    expect(alerts).toHaveLength(1);
+    const alert = alerts[0];
+    expect(alert.split('\n')[1]).toBe('DISPATCH ALERT');
+    expect(alert).toContain(`Incident: ${ids.armmc}`);
+    expect(alert).toContain('Category: Medical');
+    expect(alert).toContain('Location: ');
+    expect(alert).toContain('Assigned unit: ARMMC ALS Ambulance #1');
+  });
+
+  it('dispatch SMS names THAT station for other agencies too (River Park Authority)', async () => {
+    const token = await loginAs('flood');
+    await dispatchAs(token, ids.flood, 'FLOOD_RIVER_COMMAND', 'Rescue Boat Unit #1');
+
+    const msg = messagesTo(FLOOD_CITIZEN).find((m) =>
+      m.includes('DISPATCH UPDATE')
+    );
+    expect(msg).toBeTruthy();
+    expect(msg).toContain(
+      `Your emergency report has been dispatched to:\n${RIVER_COMMAND}`
+    );
+    expect(msg).not.toContain(CDRRMO);
+    expect(msg).not.toContain(ARMMC);
+  });
+
+  it('names Marikina CDRRMO ONLY when it is the actually selected station', async () => {
+    const token = await loginAs('medical');
+    await dispatchAs(token, ids.cdrmo, 'MEDICAL_MDRRMO_BASE', 'Rescue 161 Ambulance #1');
+
+    const msg = messagesTo(CDRRMO_CITIZEN).find((m) =>
+      m.includes('DISPATCH UPDATE')
+    );
+    expect(msg).toBeTruthy();
+    // Legitimate: this incident WAS dispatched to the CDRRMO station.
+    expect(msg).toContain(
+      `Your emergency report has been dispatched to:\n${CDRRMO}`
+    );
+    // And the CDRRMO name appears nowhere it wasn't selected (all
+    // bodies from this run: the station alert carries no org name).
+    expect(allMessages().filter((m) => m.includes(CDRRMO))).toHaveLength(1);
+  });
+
+  it('status SMS uses the new multi-line layout with incident id and the actual responding station', async () => {
+    const token = await loginAs('flood');
+    await dispatchAs(token, ids.statused, 'FLOOD_RIVER_COMMAND', 'Rescue Boat Unit #1');
+    const res = await request(app)
+      .patch(`/api/incidents/${ids.statused}/status`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ status: 'En Route' });
+    expect(res.status).toBe(200);
+
+    const msg = messagesTo(STATUS_CITIZEN).find((m) =>
+      m.includes('STATUS UPDATE')
+    );
+    expect(msg).toBeTruthy();
+    const lines = msg.split('\n');
+    expect(lines[0]).toBe('SAKLOLO 161');
+    expect(lines[1]).toBe('STATUS UPDATE');
+    expect(msg).toContain(`Incident: ${ids.statused}`);
+    expect(msg).toContain('Status: En Route');
+    expect(msg).toContain(`Responding from:\n${RIVER_COMMAND}`);
+    expect(msg).toContain('Please keep your phone available for further updates.');
+    expect(msg).not.toContain(CDRRMO);
+  });
+
+  it('resolved SMS uses the new multi-line resolved layout with incident id', async () => {
+    const token = await loginAs('flood');
+    await dispatchAs(token, ids.resolved, 'FLOOD_RIVER_COMMAND', 'Rescue Boat Unit #1');
+    const res = await request(app)
+      .patch(`/api/incidents/${ids.resolved}/status`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ status: 'Resolved' });
+    expect(res.status).toBe(200);
+
+    const msg = messagesTo(RESOLVED_CITIZEN).find((m) =>
+      m.includes('INCIDENT RESOLVED')
+    );
+    expect(msg).toBeTruthy();
+    const lines = msg.split('\n');
+    expect(lines[0]).toBe('SAKLOLO 161');
+    expect(lines[1]).toBe('INCIDENT RESOLVED');
+    expect(msg).toContain(`Incident: ${ids.resolved}`);
+    expect(msg).toContain('Status: Resolved');
+    expect(msg).toContain('Your emergency response has been completed.');
+    expect(msg).toContain('Thank you for using Saklolo 161.');
+    expect(msg).not.toContain('Responding from:');
+    expect(msg).not.toContain('STATUS UPDATE');
+  });
+
+  it('missing station info falls back safely without inventing an organization', async () => {
+    // Never dispatched → no station block, no dispatch block.
+    const token = await loginAs('flood');
+    const res = await request(app)
+      .patch(`/api/incidents/${ids.unassigned}/status`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ status: 'En Route' });
+    expect(res.status).toBe(200);
+
+    const msg = messagesTo(UNASSIGNED_CITIZEN).find((m) =>
+      m.includes('STATUS UPDATE')
+    );
+    expect(msg).toBeTruthy();
+    expect(msg).toContain('Responding from:\nNot yet assigned');
+    expect(msg).not.toContain(CDRRMO);
+    expect(msg).not.toContain(ARMMC);
+    expect(msg).not.toContain(RIVER_COMMAND);
+  });
+
+  it('dispatch and status operations still succeed when the TextBee API fails', async () => {
+    fetchSpy.mockRejectedValue(new Error('network down'));
+    const token = await loginAs('flood');
+
+    const dispatchRes = await dispatchAs(
+      token,
+      ids.failing,
+      'FLOOD_RIVER_COMMAND',
+      'Rescue Boat Unit #1'
+    );
+    expect(dispatchRes.body.data.status).toBe('Dispatched');
+
+    const patch = await request(app)
+      .patch(`/api/incidents/${ids.failing}/status`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ status: 'Resolved' });
+    expect(patch.status).toBe(200);
+    expect(patch.body.data.status).toBe('Resolved');
+  });
+});
+
 describe('POST /api/incidents/:id/evidence', () => {
   let incidentId;
   let uploadedFileId;

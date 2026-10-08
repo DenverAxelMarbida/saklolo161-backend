@@ -147,23 +147,47 @@ async function dispatchIncident(req, res, next) {
 
 /**
  * Sends a dispatch alert SMS to the responding station's duty phone.
+ * Plain-text multi-line layout (readable on basic handsets) carrying
+ * the incident's category, location, and assigned unit.
  */
 async function notifyStation(station, incident, assignedUnit) {
-  const message = `Saklolo 161 DISPATCH: ${incident.category} incident ${incident.incidentId} at ${incident.location.address}. Unit assigned: ${assignedUnit}.`;
+  const message = [
+    'SAKLOLO 161',
+    'DISPATCH ALERT',
+    '',
+    `Incident: ${incident.incidentId}`,
+    `Category: ${incident.category}`,
+    `Location: ${incident.location.address}`,
+    `Assigned unit: ${assignedUnit}`,
+  ].join('\n');
   return textbeeService.sendSms(station.phone, message);
 }
 
 /**
  * Notifies the citizen that a unit has been dispatched to their location.
- * The message uses the computed arrival ETA when one exists, falling back
- * to the station's readiness string ("2–5 mins") only when coordinates
- * were missing at dispatch time.
+ * Names the ACTUAL responding station selected for this incident
+ * (station.name — never a hardcoded/assumed organization) and uses a
+ * clean multi-line layout. The message includes the computed arrival
+ * ETA when one exists, falling back to the station's readiness string
+ * ("2–5 mins") only when coordinates were missing at dispatch time.
  */
 async function notifyCitizen(incident, station, assignedUnit) {
   const eta = Number.isInteger(incident.dispatch?.arrivalEtaMinutes)
     ? `~${incident.dispatch.arrivalEtaMinutes} min`
     : station.estimatedTurnout;
-  const message = `Saklolo 161: ${station.name} has dispatched ${assignedUnit} to your location. Arrival ETA: ${eta}.`;
+  const message = [
+    'SAKLOLO 161',
+    'DISPATCH UPDATE',
+    '',
+    'Your emergency report has been dispatched to:',
+    station.name,
+    '',
+    'Status: Dispatched',
+    `Assigned unit: ${assignedUnit}`,
+    `Arrival ETA: ${eta}`,
+    '',
+    'Please keep your phone available for further updates.',
+  ].join('\n');
   return textbeeService.sendSms(incident.citizenPhone, message);
 }
 
