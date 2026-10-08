@@ -37,7 +37,7 @@ haven't necessarily been in every session.
   real routing (`GET /api/routes` + Mapbox), evidence upload
   (`POST /api/incidents/:id/evidence`), and the 15-case contract test
   suite wired into CI. **Held as a coordinated window:** the Firebase
-  cutover (RTDB + Auth) and Semaphore-led inter-agency sends (task 5).
+  cutover (RTDB + Auth) and TextBee-led inter-agency sends (task 5).
   - Task list: `../Phase 3/saklolo161-backend-phase3-tasks.md`
   - Frozen contract to build against: `../Phase 3/saklolo161-phase3-contracts.md`
   - Auth cutover checklist: `../Phase 3/saklolo161-auth-coordination.md`
@@ -94,14 +94,23 @@ secrets are **STOP and ask** moments — never do them silently:
 
 - Setting/rotating env on Render (`MAPBOX_ACCESS_TOKEN`,
   `OPENWEATHER_API_KEY`, `JWT_SECRET`, and the held `FIREBASE_*`,
-  `FIREBASE_DATABASE_URL`, `FIREBASE_CREDENTIALS`, `SEMAPHORE_API_KEY`).
-- Enabling Firebase/Semaphore (Task 5 window only).
+  `FIREBASE_DATABASE_URL`, `FIREBASE_CREDENTIALS`, `TEXTBEE_API_KEY`,
+  `TEXTBEE_DEVICE_ID`).
+- Enabling Firebase and the TextBee SMS cutover (Task 5 window only).
 - Restarting or redeploying the shared Render instance mid-iteration.
 
 **Lead-only secrets** (never request from another dev): Render env,
-Firebase service-account JSON + RTDB URL + Storage rules, Semaphore
+Firebase service-account JSON + RTDB URL + Storage rules, TextBee
 account + API key. Any dev may set locally: `PAGASA_RIVER_ENDPOINT`,
 `PAGASA_RIVER_STATION`, a throwaway `MAPBOX_ACCESS_TOKEN`.
+
+**SMS provider: TextBee** (`services/textbeeService.js`) — SMS is
+queued to the connected Android gateway device and sent through that
+phone's SIM. HTTP 200 / success = accepted/queued, **not** guaranteed
+handset delivery; the Android phone must stay online and SMS-capable.
+`TEXTBEE_API_KEY` is a lead-only secret. `sendSms()` never rejects —
+SMS failures stay isolated from incident operations. (The legacy
+Semaphore env vars remain only for a rollback window.)
 
 ## Established Patterns
 
@@ -180,15 +189,16 @@ half-broken against a mismatched remote instance.
 - The web dashboard's `"Mark En Route"` action (Phase 2 §2.6) is now the
   only trigger for `"En Route"`; no GPS/telemetry detection exists yet
   (held — needs a responder client to generate telemetry).
-- Task 5 (Firebase RTDB + Auth + Semaphore) is deliberately NOT shipped —
-  it is a coordinated window with the web `auth.js` swap. `authService.js`
-  still issues JWTs against `data/mockUsers.js`.
+- Task 5 (Firebase RTDB + Auth + TextBee inter-agency sends) is
+  deliberately NOT shipped — it is a coordinated window with the web
+  `auth.js` swap. `authService.js` still issues JWTs against
+  `data/mockUsers.js`.
 
 ## Post-Phase-3 Backlog (QA hardening — do NOT start until Task 5's window passes)
 
 Recorded from the river-feed QA audit (flood-warning product). All items
 are **additive, client-contract-safe** (`source`-style: new fields clients
-ignore). Revisit after the Firebase/Semaphore cutover window.
+ignore). Revisit after the Firebase/TextBee cutover window.
 
 1. **`degraded: true` on mock mode** — alongside `source: "mock"` in
    `GET /api/weather-river` so degradation is machine-visible to ops (a

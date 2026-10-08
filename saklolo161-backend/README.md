@@ -1,8 +1,8 @@
 # Saklolo 161 — Middleware Gateway (Phase 1)
 
-Node.js/Express middleware gateway for the **Saklolo 161 Emergency Response System**, a capstone SOA project for Marikina City. This service sits between the React Native mobile app, the React Web Dashboard, Firebase, and external APIs (Mapbox Geocoding, Semaphore SMS, Firebase Cloud Messaging).
+Node.js/Express middleware gateway for the **Saklolo 161 Emergency Response System**, a capstone SOA project for Marikina City. This service sits between the React Native mobile app, the React Web Dashboard, Firebase, and external APIs (Mapbox Geocoding, TextBee SMS, Firebase Cloud Messaging).
 
-**Phase 1 status:** Mock mode. Endpoints return realistic fake data so all 5 developers can build UI/logic in parallel without waiting on live Firebase, Mapbox, or Semaphore credentials.
+**Phase 1 status:** Mock mode. Endpoints return realistic fake data so all 5 developers can build UI/logic in parallel without waiting on live Firebase, Mapbox, or TextBee credentials.
 
 ---
 
@@ -20,7 +20,7 @@ saklolo161-backend/
 │   └── incidentRoutes.js
 ├── services/
 │   ├── mapboxService.js    # Reverse geocoding (mocked)
-│   └── semaphoreService.js # SMS notifications (mocked)
+│   └── textbeeService.js   # SMS notifications (TextBee gateway)
 ├── middlewares/
 │   ├── validateIncident.js # Field validation for POST /api/incidents
 │   └── errorHandler.js     # 404 + centralized error handling
@@ -49,7 +49,22 @@ npm run dev
 
 Server runs at **http://localhost:5000** by default. Visit `http://localhost:5000/` for a health check.
 
-> No real Mapbox/Semaphore/Firebase credentials are needed to run Phase 1 — everything runs in mock mode out of the box.
+> No real Mapbox/TextBee/Firebase credentials are needed to run Phase 1 — everything runs in mock mode out of the box.
+
+### SMS provider (TextBee)
+
+SMS notifications (incident creation, status updates, dispatch alerts) go through
+**TextBee** (`services/textbeeService.js`, `POST /api/v1/gateway/send-sms`):
+
+- TextBee **queues** each message to the connected Android device; the phone's
+  SIM sends it. An HTTP 200 / `success` result means **accepted/queued — not
+  guaranteed handset delivery**.
+- The **Android gateway phone must remain online and SMS-capable**; if it is
+  offline (or no device is enabled), sends fail — safely: `sendSms()` never
+  rejects, and an SMS failure never blocks or rolls back an incident operation.
+- `TEXTBEE_API_KEY` is a **lead-only secret** (set in Render env / local `.env`
+  only — never committed, logged, or shared). `TEXTBEE_DEVICE_ID` is optional;
+  leave it empty to use TextBee's default device.
 
 ---
 
@@ -127,7 +142,7 @@ curl -X PATCH http://localhost:5000/api/incidents/INC-20250811-0001/status \
 | **Mobile UI Developer** | Builds the React Native citizen-facing screens (incident report form, status tracker) against the endpoints above. | Consumes `POST /api/incidents`, `GET /api/incidents/:id` |
 | **Mobile GPS/Mapbox Developer** | Wires up real GPS capture in the app and replaces the mocked `mapboxService.js` with live Mapbox Geocoding calls. | `services/mapboxService.js` |
 | **Admin Web Dashboard Developer** | Builds the React web dashboard for dispatchers to view/manage incidents and update statuses. | Consumes `GET /api/incidents`, `PATCH /api/incidents/:id/status` |
-| **Database/Notification Engine Developer** | Replaces the in-memory mock store with real Firebase Realtime Database calls, wires up Firebase Cloud Messaging, and implements the real Semaphore SMS integration. | `config/firebase.js`, `services/semaphoreService.js`, `data/mockIncidents.js` |
+| **Database/Notification Engine Developer** | Replaces the in-memory mock store with real Firebase Realtime Database calls, wires up Firebase Cloud Messaging, and maintains the TextBee SMS integration. | `config/firebase.js`, `services/textbeeService.js`, `data/mockIncidents.js` |
 
 ### Suggested Phase 2 handoff notes
 - Every mock section in the code is clearly commented with `MOCK MODE` and includes the real implementation, commented out, right above it — just uncomment and fill in credentials.
@@ -138,4 +153,4 @@ curl -X PATCH http://localhost:5000/api/incidents/INC-20250811-0001/status \
 
 ## 6. Environment Variables
 
-See `.env.example` for the full list: `PORT`, `MAPBOX_ACCESS_TOKEN`, `SEMAPHORE_API_KEY`, `FIREBASE_CREDENTIALS`, `FIREBASE_DATABASE_URL`. Never commit your actual `.env` file — it's already in `.gitignore`.
+See `.env.example` for the full list: `PORT`, `MAPBOX_ACCESS_TOKEN`, `TEXTBEE_API_KEY`, `FIREBASE_CREDENTIALS`, `FIREBASE_DATABASE_URL`. Never commit your actual `.env` file — it's already in `.gitignore`. (`TEXTBEE_API_KEY` is a lead-only secret — never paste a real value into docs, code, or commits.)

@@ -12,7 +12,7 @@
 
 const incidentService = require('../services/incidentService');
 const stationService = require('../services/stationService');
-const semaphoreService = require('../services/semaphoreService');
+const textbeeService = require('../services/textbeeService');
 const { getRoute } = require('../services/routingService');
 
 /**
@@ -131,7 +131,7 @@ async function dispatchIncident(req, res, next) {
       station: stationBlock,
     });
 
-    // ---- 6. Notify station + citizen (mocked via semaphoreService in Phase 1/2) ----
+    // ---- 6. Notify station + citizen (textbeeService — best-effort) ----
     await notifyStation(station, updated, assignedUnit);
     await notifyCitizen(updated, station, assignedUnit);
 
@@ -150,7 +150,7 @@ async function dispatchIncident(req, res, next) {
  */
 async function notifyStation(station, incident, assignedUnit) {
   const message = `Saklolo 161 DISPATCH: ${incident.category} incident ${incident.incidentId} at ${incident.location.address}. Unit assigned: ${assignedUnit}.`;
-  return semaphoreService.sendSms(station.phone, message);
+  return textbeeService.sendSms(station.phone, message);
 }
 
 /**
@@ -164,7 +164,7 @@ async function notifyCitizen(incident, station, assignedUnit) {
     ? `~${incident.dispatch.arrivalEtaMinutes} min`
     : station.estimatedTurnout;
   const message = `Saklolo 161: ${station.name} has dispatched ${assignedUnit} to your location. Arrival ETA: ${eta}.`;
-  return semaphoreService.sendSms(incident.citizenPhone, message);
+  return textbeeService.sendSms(incident.citizenPhone, message);
 }
 
 /**

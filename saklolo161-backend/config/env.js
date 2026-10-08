@@ -29,7 +29,15 @@ module.exports = {
     'https://pasig-marikina-tullahanffws.pagasa.dost.gov.ph/water/table_list.do',
   PAGASA_RIVER_STATION: process.env.PAGASA_RIVER_STATION || 'Nangka',
 
-  // Semaphore SMS
+  // TextBee SMS gateway (Android device + SIM). TEXTBEE_API_KEY is a
+  // lead-only secret — set it in Render env, never commit it.
+  // TEXTBEE_DEVICE_ID is optional: when empty, TextBee uses its
+  // default/last-online device; set it to pin a specific phone.
+  TEXTBEE_API_KEY: process.env.TEXTBEE_API_KEY || '',
+  TEXTBEE_DEVICE_ID: process.env.TEXTBEE_DEVICE_ID || '',
+
+  // Semaphore SMS (legacy — kept temporarily for rollback only;
+  // application code now sends through TextBee).
   SEMAPHORE_API_KEY: process.env.SEMAPHORE_API_KEY || '',
   SEMAPHORE_SENDER_NAME: process.env.SEMAPHORE_SENDER_NAME || 'SAKLOLO161',
 
