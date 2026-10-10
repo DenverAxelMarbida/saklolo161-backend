@@ -972,6 +972,60 @@ describe('SMS ordering, duplicates & failure isolation (regression)', () => {
     expect(stationAlerts()).toHaveLength(1);
   });
 
+  it('full lifecycle delivers all four citizen texts: received, dispatched, en route, resolved', async () => {
+    // Production incident INC-20261010-1911: Pending, Dispatched and
+    // Resolved arrived but En Route did not, while TextBee showed the
+    // En Route send as accepted ("Handed to phone"). This pins the
+    // backend half of that sequence — every genuine transition from
+    // creation through resolution hands exactly one SMS to TextBee, in
+    // order, with the En Route text using the STATUS UPDATE template.
+    // (Acceptance by TextBee is not handset delivery; a missing handset
+    // text with a recorded gateway submission is a gateway/carrier
+    // matter, not a skipped backend notification.)
+    const LIFECYCLE_CITIZEN = '+639170002011';
+    const created = await request(app)
+      .post('/api/incidents')
+      .send({ ...makeIncident('Flood'), citizenPhone: LIFECYCLE_CITIZEN });
+    expect(created.status).toBe(201);
+    const incidentId = created.body.data.incidentId;
+
+    const token = await loginAs('flood');
+    const dispatchRes = await dispatchFlood(token, incidentId);
+    expect(dispatchRes.status).toBe(200);
+
+    const enRoute = await patchStatus(token, incidentId, 'En Route');
+    expect(enRoute.status).toBe(200);
+
+    const resolved = await patchStatus(token, incidentId, 'Resolved');
+    expect(resolved.status).toBe(200);
+
+    // 1 creation + 2 dispatch (station alert + citizen) + 1 En Route + 1 Resolved.
+    await waitForSubmissions(5);
+
+    const citizenMsgs = messagesTo(LIFECYCLE_CITIZEN);
+    expect(citizenMsgs).toHaveLength(4);
+    const receivedIdx = citizenMsgs.findIndex((m) => m.includes('has been received'));
+    const dispatchedIdx = citizenMsgs.findIndex((m) => m.includes('DISPATCH UPDATE'));
+    const enRouteIdx = citizenMsgs.findIndex((m) => m.includes('Status: En Route'));
+    const resolvedIdx = citizenMsgs.findIndex((m) => m.includes('INCIDENT RESOLVED'));
+    expect(receivedIdx).toBe(0);
+    expect(dispatchedIdx).toBeGreaterThan(receivedIdx);
+    expect(enRouteIdx).toBeGreaterThan(dispatchedIdx);
+    expect(resolvedIdx).toBeGreaterThan(enRouteIdx);
+
+    // The En Route text is a STATUS UPDATE for this incident naming the
+    // actual responding station — never skipped, never a re-sent dispatch.
+    const enRouteMsg = citizenMsgs[enRouteIdx];
+    expect(enRouteMsg.split('\n')[1]).toBe('STATUS UPDATE');
+    expect(enRouteMsg).toContain(`Incident: ${incidentId}`);
+    expect(enRouteMsg).toContain('Responding from:\nRiver Park Authority');
+    expect(enRouteMsg).not.toContain('DISPATCH UPDATE');
+    expect(enRouteMsg).not.toContain('INCIDENT RESOLVED');
+
+    // One station alert for the whole lifecycle, no duplicates anywhere.
+    expect(stationAlerts()).toHaveLength(1);
+  });
+
   it('repeating the same status update sends no duplicate SMS but still returns 200', async () => {
     const token = await loginAs('flood');
 
