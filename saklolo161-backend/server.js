@@ -33,6 +33,23 @@ app.use(cors(corsOptions));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+// Minimal request log: method, path, status, elapsed ms — enough to
+// separate backend latency from SMS-provider delay in Render logs.
+// Never logs bodies, query strings, headers, phones, or tokens.
+// Capture method/path up front: routers mutate req.url while handling,
+// so reading req.path in the finish callback can log a mount-relative
+// path (e.g. "/login" instead of "/api/auth/login").
+app.use((req, res, next) => {
+  const start = process.hrtime.bigint();
+  const method = req.method;
+  const path = req.originalUrl.split('?')[0];
+  res.on('finish', () => {
+    const elapsedMs = Number(process.hrtime.bigint() - start) / 1e6;
+    console.log(`${method} ${path} ${res.statusCode} ${elapsedMs.toFixed(1)}ms`);
+  });
+  next();
+});
+
 // ---- Firebase Init (mocked in Phase 1, see config/firebase.js) --------
 initializeFirebase();
 
