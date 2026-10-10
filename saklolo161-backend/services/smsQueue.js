@@ -3,29 +3,32 @@
  * --------------------------------------------------------------
  * Per-incident ordered SMS dispatch + duplicate-announcement guard.
  *
- * WHY THIS EXISTS (production bug): every handler used to call
- * sendSms() on its own. A dispatch was still waiting out the station
- * alert round-trip (and the arrival-ETA computation) while the
- * incident already read "Dispatched", so a quick "Mark En Route" PATCH
- * could hand its SMS to TextBee FIRST — the citizen then received the
- * Dispatched and En Route texts together, out of order. Repeated or
- * racing status requests also produced duplicate texts.
+ * SMS policy is start/end only: citizens get a report-confirmation text
+ * at creation and a resolution text on the genuine transition to
+ * Resolved — nothing in between. Dispatch sends no SMS at all (station
+ * contact stays voice-call). This queue still orders the two citizen
+ * texts so the resolution can never be submitted before the
+ * confirmation, and repeated or racing requests still produce no
+ * duplicates.
  *
  * TWO PRIMITIVES:
  *   enqueue(incidentId, job)
  *     One FIFO chain per incident: `job` only starts once the previous
  *     job for that incident has settled, so submission order to
- *     TextBee matches event order (creation → dispatch → each status
- *     change). Chains for DIFFERENT incidents never block each other,
- *     and the returned promise NEVER rejects — a failed job is logged
- *     and dropped (no retries), so awaiting it can never fail the
- *     caller's HTTP response and one event can never produce two
+ *     TextBee matches event order (creation confirmation before
+ *     resolution). Chains for DIFFERENT incidents never block each
+ *     other, and the returned promise NEVER rejects — a failed job is
+ *     logged and dropped (no retries), so awaiting it can never fail
+ *     the caller's HTTP response and one event can never produce two
  *     messages.
  *   claimAnnouncement(incidentId, status)
  *     Synchronous check-and-set: returns true the first time a status
  *     is announced for an incident, false for every repeat — even when
  *     two identical requests race, because JS finishes the claim in
  *     one turn of the event loop before the other request can run it.
+ *     Every genuine status transition claims (so leaving Resolved and
+ *     coming back announces again), but only the Resolved claim leads
+ *     to an SMS; the rest just record the transition for dedup.
  *
  * The chain state and the claims live in this process only (reset on
  * redeploy, like the mock incident store). Message content and the
@@ -37,9 +40,10 @@
 // incidentId -> tail promise of that incident's chain (never rejects).
 const chains = new Map();
 
-// incidentId -> last status announced to the citizen ("Dispatched" is
-// claimed by the dispatch endpoint itself, so no later status PATCH
-// can re-announce it).
+// incidentId -> last status announced to the citizen. Every genuine
+// transition claims its status (so a repeat still returns the normal
+// 200 envelope but sends nothing); only the Resolved claim leads to
+// an SMS — intermediate statuses are tracked for dedup only.
 const lastAnnounced = new Map();
 
 // Bound the claim map so a long-lived dev process can't grow it

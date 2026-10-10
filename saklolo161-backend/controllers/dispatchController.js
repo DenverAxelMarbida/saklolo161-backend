@@ -12,8 +12,6 @@
 
 const incidentService = require('../services/incidentService');
 const stationService = require('../services/stationService');
-const textbeeService = require('../services/textbeeService');
-const smsQueue = require('../services/smsQueue');
 const { getRoute } = require('../services/routingService');
 
 /**
@@ -26,7 +24,11 @@ const { getRoute } = require('../services/routingService');
  *   3. Confirm the station exists and matches the incident's category.
  *   4. Confirm the unit actually belongs to that station.
  *   5. Update the incident's status + attach dispatch details.
- *   6. Fire SMS alerts to both the station and the citizen.
+ *
+ * SMS policy (start/end only): dispatch sends NO text messages — not
+ * to the station, not to the citizen. The citizen already received a
+ * report confirmation at creation and will receive a resolution text
+ * when the incident is resolved. Station contact stays voice-call.
  */
 async function dispatchIncident(req, res, next) {
   try {
@@ -101,69 +103,39 @@ async function dispatchIncident(req, res, next) {
     await incidentService.updateStatus(incidentId, 'Dispatched');
 
     // Compute a real driving ETA from the same routing service the web
-    // dashboard uses (so the citizen SMS and the mobile tracker show
-    // arrival time — never the station's canned readiness string, which
-    // can be wildly short when a unit is dispatched across town) and
-    // persist the dispatch/station blocks — but as promises started
-    // NOW, not awaited yet. The SMS job below is queued before either
-    // resolves because enqueue ORDER is what guarantees the citizen's
-    // Dispatched text is handed to TextBee ahead of any status text
-    // queued after it (e.g. a racing "Mark En Route").
-    const etaPromise = computeArrivalEta(station, incident.location);
-    const updatedPromise = (async () => {
-      const arrivalEtaMinutes = await etaPromise;
+    // dashboard and mobile tracker use (never the station's canned
+    // readiness string, which can be wildly short when a unit is
+    // dispatched across town) and persist the dispatch/station blocks.
+    const arrivalEtaMinutes = await computeArrivalEta(station, incident.location);
 
-      const dispatchBlock = {
-        stationId: station.id,
-        stationName: station.name,
-        assignedUnit,
-        estimatedTurnout: station.estimatedTurnout,
-        dispatchedAt: new Date().toISOString(),
-      };
-      if (arrivalEtaMinutes) dispatchBlock.arrivalEtaMinutes = arrivalEtaMinutes;
+    const dispatchBlock = {
+      stationId: station.id,
+      stationName: station.name,
+      assignedUnit,
+      estimatedTurnout: station.estimatedTurnout,
+      dispatchedAt: new Date().toISOString(),
+    };
+    if (arrivalEtaMinutes) dispatchBlock.arrivalEtaMinutes = arrivalEtaMinutes;
 
-      // Contract anchor: the responding station is exposed at the TOP
-      // level (`incident.station.coords`), not nested under dispatch.
-      const stationBlock = {
-        id: station.id,
-        name: station.name,
-        coords: station.coords || null,
-      };
+    // Contract anchor: the responding station is exposed at the TOP
+    // level (`incident.station.coords`), not nested under dispatch.
+    const stationBlock = {
+      id: station.id,
+      name: station.name,
+      coords: station.coords || null,
+    };
 
-      // Persist both blocks via the service (mutating the returned
-      // record directly only lands in the mock store — RTDB re-reads
-      // are plain objects). Returns the persisted incident.
-      return incidentService.attachDispatch(incidentId, {
-        dispatch: dispatchBlock,
-        station: stationBlock,
-      });
-    })();
-
-    // ---- 6. Notify station + citizen (textbeeService — best-effort) ----
-    // Claim "Dispatched" for this incident so no later status PATCH can
-    // announce it a second time, then queue ONE job on this incident's
-    // ordered SMS chain. The job resolves the dispatch record itself, so
-    // its place in the chain is fixed immediately even while the ETA /
-    // attach writes are still in flight.
-    smsQueue.claimAnnouncement(incidentId, 'Dispatched');
-    // Fire-and-forget: the queue promise never rejects, so the 200 can
-    // return after the dispatch write without waiting on TextBee.
-    // FIFO still orders this Dispatched text ahead of any later status
-    // text for the same incident.
-    smsQueue.enqueue(incidentId, async () => {
-      const persisted = await updatedPromise;
-      // Station alert and citizen update start TOGETHER: the citizen's
-      // text must never queue behind the station's round-trip. Both are
-      // best-effort — sendSms() never rejects, and the chain swallows
-      // anything a message builder could throw, so SMS can never fail
-      // the dispatch.
-      await Promise.all([
-        notifyStation(station, persisted, assignedUnit),
-        notifyCitizen(persisted, station, assignedUnit),
-      ]);
+    // Persist both blocks via the service (mutating the returned
+    // record directly only lands in the mock store — RTDB re-reads
+    // are plain objects). Returns the persisted incident.
+    const updated = await incidentService.attachDispatch(incidentId, {
+      dispatch: dispatchBlock,
+      station: stationBlock,
     });
 
-    const updated = await updatedPromise;
+    // No SMS here by design (start/end-only policy): neither the
+    // station nor the citizen is texted on dispatch. Station contact
+    // stays voice-call; the citizen's next text is the resolution SMS.
 
     return res.status(200).json({
       success: true,
@@ -176,57 +148,11 @@ async function dispatchIncident(req, res, next) {
 }
 
 /**
- * Sends a dispatch alert SMS to the responding station's duty phone.
- * Plain-text multi-line layout (readable on basic handsets) carrying
- * the incident's category, location, and assigned unit.
- */
-async function notifyStation(station, incident, assignedUnit) {
-  const message = [
-    'SAKLOLO 161',
-    'DISPATCH ALERT',
-    '',
-    `Incident: ${incident.incidentId}`,
-    `Category: ${incident.category}`,
-    `Location: ${incident.location.address}`,
-    `Assigned unit: ${assignedUnit}`,
-  ].join('\n');
-  return textbeeService.sendSms(station.phone, message);
-}
-
-/**
- * Notifies the citizen that a unit has been dispatched to their location.
- * Names the ACTUAL responding station selected for this incident
- * (station.name — never a hardcoded/assumed organization) and uses a
- * clean multi-line layout. The message includes the computed arrival
- * ETA when one exists, falling back to the station's readiness string
- * ("2–5 mins") only when coordinates were missing at dispatch time.
- */
-async function notifyCitizen(incident, station, assignedUnit) {
-  const eta = Number.isInteger(incident.dispatch?.arrivalEtaMinutes)
-    ? `~${incident.dispatch.arrivalEtaMinutes} min`
-    : station.estimatedTurnout;
-  const message = [
-    'SAKLOLO 161',
-    'DISPATCH UPDATE',
-    '',
-    'Your emergency report has been dispatched to:',
-    station.name,
-    '',
-    'Status: Dispatched',
-    `Assigned unit: ${assignedUnit}`,
-    `Arrival ETA: ${eta}`,
-    '',
-    'Please keep your phone available for further updates.',
-  ].join('\n');
-  return textbeeService.sendSms(incident.citizenPhone, message);
-}
-
-/**
  * Computes a real arrival ETA (whole minutes, clamped to >= 1) via the
  * same routing service the web dashboard uses. Returns null when either
  * endpoint lacks coordinates or the routing call fails — a dispatch must
- * never fail over an ETA computation; notifyCitizen then falls back to
- * the station's canned readiness string.
+ * never fail over an ETA computation; the response then simply omits
+ * arrivalEtaMinutes.
  */
 async function computeArrivalEta(station, location) {
   const c = station && station.coords;

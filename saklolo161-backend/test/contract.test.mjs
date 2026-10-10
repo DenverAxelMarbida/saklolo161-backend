@@ -363,7 +363,7 @@ describe('dispatch → station anchor', () => {
     expect(res.body.data.station.coords).toEqual({ lat: expect.any(Number), lng: expect.any(Number) });
 
     // Dispatch now computes a real arrival ETA (whole minutes) so the
-    // citizen SMS and mobile tracker show driving time, not readiness.
+    // mobile tracker shows driving time, not readiness.
     expect(res.body.data.dispatch).toBeTruthy();
     expect(Number.isInteger(res.body.data.dispatch.arrivalEtaMinutes)).toBe(true);
     expect(res.body.data.dispatch.arrivalEtaMinutes).toBeGreaterThanOrEqual(1);
@@ -375,7 +375,7 @@ describe('dispatch → station anchor', () => {
     expect(detail.body.data.station.coords.lng).toBe(121.09384592111986);
   });
 
-  it('texts the citizen a real arrival ETA (fetch stubbed — no real SMS)', async () => {
+  it('dispatch sends no SMS but still computes a real arrival ETA (fetch stubbed — no real SMS)', async () => {
     const token = await loginAs('flood');
     const expectedMin = Math.max(
       1,
@@ -391,10 +391,10 @@ describe('dispatch → station anchor', () => {
       )
     );
 
-    // Stub fetch + configure a throwaway key so sendSms() actually
-    // builds the TextBee request — the assertion below inspects the
-    // request body instead of the old "[MOCK SMS]" console line, and
-    // no network call leaves the process.
+    // Stub fetch + configure a throwaway key so any SMS attempt would
+    // be visible — the assertion below proves dispatch makes NO TextBee
+    // request at all (start/end-only policy), and no network call
+    // leaves the process.
     const fetchSpy = vi.fn(async () => ({
       ok: true,
       status: 200,
@@ -419,23 +419,10 @@ describe('dispatch → station anchor', () => {
       const detail = await request(app).get(`/api/incidents/${incidentId}`);
       expect(detail.body.data.dispatch.arrivalEtaMinutes).toBe(expectedMin);
 
-      const smsStart = Date.now();
-      while (fetchSpy.mock.calls.length < 2) {
-        if (Date.now() - smsStart > 2000) {
-          throw new Error('timed out waiting for fire-and-forget dispatch SMS');
-        }
-        await new Promise((r) => setTimeout(r, 5));
-      }
-      expect(fetchSpy).toHaveBeenCalled();
-      const [url, init] = fetchSpy.mock.calls[0];
-      expect(url).toBe('https://api.textbee.dev/api/v1/gateway/send-sms');
-      expect(init.method).toBe('POST');
-
-      const smsBodies = fetchSpy.mock.calls.map((call) => JSON.parse(call[1].body));
-      const citizenSms = smsBodies.find((b) => b.recipients.includes('+639121987654'));
-      expect(citizenSms).toBeTruthy();
-      expect(citizenSms.message).toContain(`Arrival ETA: ~${expectedMin} min`);
-      expect(citizenSms.message).not.toContain('ETA: 2–5 mins');
+      // Give any (incorrect) background SMS a moment to appear.
+      await new Promise((r) => setTimeout(r, 50));
+      const textbeeCalls = fetchSpy.mock.calls.filter((call) => call[1]?.body);
+      expect(textbeeCalls).toHaveLength(0);
     } finally {
       vi.unstubAllGlobals();
       env.TEXTBEE_API_KEY = '';
@@ -444,9 +431,10 @@ describe('dispatch → station anchor', () => {
 });
 
 describe('SMS notification content (TextBee request bodies)', () => {
-  // Message-construction coverage: verifies WHICH station the SMS
-  // names and the plain-text multi-line layouts. fetch is stubbed and
-  // a throwaway key is set, so no real SMS can ever leave the suite.
+  // Start/end-only policy: the citizen gets a report confirmation at
+  // creation and a resolution text on Resolved — dispatch and
+  // intermediate statuses send nothing, to any phone. fetch is stubbed
+  // and a throwaway key is set, so no real SMS can ever leave the suite.
   const TEST_KEY = 'test-key-contract-suite';
   const ORIGINAL_KEY = env.TEXTBEE_API_KEY;
 
@@ -454,15 +442,8 @@ describe('SMS notification content (TextBee request bodies)', () => {
   // 3 reports per phone per 10-minute window.
   const MEDICAL_CITIZEN = '+639170001001';
   const FLOOD_CITIZEN = '+639170001002';
-  const CDRRMO_CITIZEN = '+639170001003';
-  const STATUS_CITIZEN = '+639170001004';
   const RESOLVED_CITIZEN = '+639170001005';
-  const UNASSIGNED_CITIZEN = '+639170001006';
   const FAILING_CITIZEN = '+639170001007';
-
-  const CDRRMO = 'Marikina City Disaster Risk Reduction Management Office';
-  const ARMMC = 'Amang Rodriguez Memorial Medical Center';
-  const RIVER_COMMAND = 'River Park Authority';
 
   let ids;
   let fetchSpy;
@@ -478,10 +459,7 @@ describe('SMS notification content (TextBee request bodies)', () => {
     ids = {
       armmc: await create('Medical', MEDICAL_CITIZEN),
       flood: await create('Flood', FLOOD_CITIZEN),
-      cdrmo: await create('Medical', CDRRMO_CITIZEN),
-      statused: await create('Flood', STATUS_CITIZEN),
       resolved: await create('Flood', RESOLVED_CITIZEN),
-      unassigned: await create('Flood', UNASSIGNED_CITIZEN),
       failing: await create('Flood', FAILING_CITIZEN),
     };
   });
@@ -510,7 +488,11 @@ describe('SMS notification content (TextBee request bodies)', () => {
   });
 
   const sentBodies = () =>
-    fetchSpy.mock.calls.map((call) => JSON.parse(call[1].body));
+    // Only the TextBee POSTs carry a body — the mapbox reverse-geocode
+    // call (single-argument fetch) is stubbed too and must be skipped.
+    fetchSpy.mock.calls
+      .filter((call) => call[1]?.body)
+      .map((call) => JSON.parse(call[1].body));
   const messagesTo = (phone) =>
     sentBodies()
       .filter((b) => b.recipients.includes(phone))
@@ -540,104 +522,39 @@ describe('SMS notification content (TextBee request bodies)', () => {
     return res;
   }
 
-  it('dispatch SMS names the ACTUAL selected station (ARMMC) in the new multi-line layout', async () => {
-    const token = await loginAs('medical');
-    await dispatchAs(token, ids.armmc, 'MEDICAL_ARMMC_ER', 'ARMMC ALS Ambulance #1');
-    await waitForSms(2);
-
-    const citizen = messagesTo(MEDICAL_CITIZEN);
-    expect(citizen).toHaveLength(1);
-    const msg = citizen[0];
-
-    // Actual responding station — not any assumed default.
-    expect(msg).toContain(
-      `Your emergency report has been dispatched to:\n${ARMMC}`
-    );
-    expect(msg).not.toContain(CDRRMO);
-
-    // Clean multi-line dispatch layout.
-    const lines = msg.split('\n');
-    expect(lines[0]).toBe('SAKLOLO 161');
-    expect(lines[1]).toBe('DISPATCH UPDATE');
-    expect(msg).toContain('Status: Dispatched');
-    expect(msg).toContain('Assigned unit: ARMMC ALS Ambulance #1');
-    expect(msg).toContain('Arrival ETA: ');
-    expect(msg).toContain('Please keep your phone available for further updates.');
-  });
-
-  it('station duty alert uses the clean multi-line dispatch layout with incident details', async () => {
-    const token = await loginAs('medical');
-    await dispatchAs(token, ids.armmc, 'MEDICAL_ARMMC_ER', 'ARMMC ALS Ambulance #1');
-    await waitForSms(2);
-
-    const alerts = allMessages().filter((m) =>
-      m.startsWith('SAKLOLO 161\nDISPATCH ALERT')
-    );
-    expect(alerts).toHaveLength(1);
-    const alert = alerts[0];
-    expect(alert.split('\n')[1]).toBe('DISPATCH ALERT');
-    expect(alert).toContain(`Incident: ${ids.armmc}`);
-    expect(alert).toContain('Category: Medical');
-    expect(alert).toContain('Location: ');
-    expect(alert).toContain('Assigned unit: ARMMC ALS Ambulance #1');
-  });
-
-  it('dispatch SMS names THAT station for other agencies too (River Park Authority)', async () => {
+  it('dispatch sends no SMS to the citizen', async () => {
     const token = await loginAs('flood');
     await dispatchAs(token, ids.flood, 'FLOOD_RIVER_COMMAND', 'Rescue Boat Unit #1');
-    await waitForSms(2);
 
-    const msg = messagesTo(FLOOD_CITIZEN).find((m) =>
-      m.includes('DISPATCH UPDATE')
-    );
-    expect(msg).toBeTruthy();
-    expect(msg).toContain(
-      `Your emergency report has been dispatched to:\n${RIVER_COMMAND}`
-    );
-    expect(msg).not.toContain(CDRRMO);
-    expect(msg).not.toContain(ARMMC);
+    // Give any (incorrect) background SMS a moment to appear.
+    await new Promise((r) => setTimeout(r, 50));
+    expect(sentBodies()).toHaveLength(0);
+    expect(messagesTo(FLOOD_CITIZEN)).toHaveLength(0);
   });
 
-  it('names Marikina CDRRMO ONLY when it is the actually selected station', async () => {
+  it('dispatch sends no SMS to any station phone', async () => {
     const token = await loginAs('medical');
-    await dispatchAs(token, ids.cdrmo, 'MEDICAL_MDRRMO_BASE', 'Rescue 161 Ambulance #1');
-    await waitForSms(2);
+    await dispatchAs(token, ids.armmc, 'MEDICAL_ARMMC_ER', 'ARMMC ALS Ambulance #1');
 
-    const msg = messagesTo(CDRRMO_CITIZEN).find((m) =>
-      m.includes('DISPATCH UPDATE')
-    );
-    expect(msg).toBeTruthy();
-    // Legitimate: this incident WAS dispatched to the CDRRMO station.
-    expect(msg).toContain(
-      `Your emergency report has been dispatched to:\n${CDRRMO}`
-    );
-    // And the CDRRMO name appears nowhere it wasn't selected (all
-    // bodies from this run: the station alert carries no org name).
-    expect(allMessages().filter((m) => m.includes(CDRRMO))).toHaveLength(1);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(sentBodies()).toHaveLength(0);
+    expect(
+      allMessages().filter((m) => m.startsWith('SAKLOLO 161\nDISPATCH ALERT'))
+    ).toHaveLength(0);
   });
 
-  it('status SMS uses the new multi-line layout with incident id and the actual responding station', async () => {
+  it('changing the status to En Route sends no SMS', async () => {
     const token = await loginAs('flood');
-    await dispatchAs(token, ids.statused, 'FLOOD_RIVER_COMMAND', 'Rescue Boat Unit #1');
     const res = await request(app)
-      .patch(`/api/incidents/${ids.statused}/status`)
+      .patch(`/api/incidents/${ids.flood}/status`)
       .set('Authorization', `Bearer ${token}`)
       .send({ status: 'En Route' });
     expect(res.status).toBe(200);
-    await waitForSms(3);
+    expect(res.body.data.status).toBe('En Route');
 
-    const msg = messagesTo(STATUS_CITIZEN).find((m) =>
-      m.includes('STATUS UPDATE')
-    );
-    expect(msg).toBeTruthy();
-    const lines = msg.split('\n');
-    expect(lines[0]).toBe('SAKLOLO 161');
-    expect(lines[1]).toBe('STATUS UPDATE');
-    expect(msg).toContain(`Incident: ${ids.statused}`);
-    expect(msg).toContain('Status: En Route');
-    expect(msg).toContain(`Responding from:\n${RIVER_COMMAND}`);
-    expect(msg).toContain('Please keep your phone available for further updates.');
-    expect(msg).not.toContain(CDRRMO);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(sentBodies()).toHaveLength(0);
+    expect(messagesTo(FLOOD_CITIZEN)).toHaveLength(0);
   });
 
   it('resolved SMS uses the new multi-line resolved layout with incident id', async () => {
@@ -648,7 +565,7 @@ describe('SMS notification content (TextBee request bodies)', () => {
       .set('Authorization', `Bearer ${token}`)
       .send({ status: 'Resolved' });
     expect(res.status).toBe(200);
-    await waitForSms(3);
+    await waitForSms(1);
 
     const msg = messagesTo(RESOLVED_CITIZEN).find((m) =>
       m.includes('INCIDENT RESOLVED')
@@ -665,24 +582,26 @@ describe('SMS notification content (TextBee request bodies)', () => {
     expect(msg).not.toContain('STATUS UPDATE');
   });
 
-  it('missing station info falls back safely without inventing an organization', async () => {
-    // Never dispatched → no station block, no dispatch block.
+  it('resolving a never-dispatched incident still sends exactly one resolution SMS', async () => {
+    // No dispatch block, no station info — the resolution text must not
+    // depend on either.
+    const created = await request(app)
+      .post('/api/incidents')
+      .send({ ...makeIncident('Flood'), citizenPhone: '+639170001006' });
+    expect(created.status).toBe(201);
     const token = await loginAs('flood');
     const res = await request(app)
-      .patch(`/api/incidents/${ids.unassigned}/status`)
+      .patch(`/api/incidents/${created.body.data.incidentId}/status`)
       .set('Authorization', `Bearer ${token}`)
-      .send({ status: 'En Route' });
+      .send({ status: 'Resolved' });
     expect(res.status).toBe(200);
-    await waitForSms(1);
+    await waitForSms(2);
 
-    const msg = messagesTo(UNASSIGNED_CITIZEN).find((m) =>
-      m.includes('STATUS UPDATE')
+    const msg = messagesTo('+639170001006').find((m) =>
+      m.includes('INCIDENT RESOLVED')
     );
     expect(msg).toBeTruthy();
-    expect(msg).toContain('Responding from:\nNot yet assigned');
-    expect(msg).not.toContain(CDRRMO);
-    expect(msg).not.toContain(ARMMC);
-    expect(msg).not.toContain(RIVER_COMMAND);
+    expect(msg).toContain(`Incident: ${created.body.data.incidentId}`);
   });
 
   it('dispatch and status operations still succeed when the TextBee API fails', async () => {
@@ -703,16 +622,19 @@ describe('SMS notification content (TextBee request bodies)', () => {
       .send({ status: 'Resolved' });
     expect(patch.status).toBe(200);
     expect(patch.body.data.status).toBe('Resolved');
+    // The resolution send was ATTEMPTED and its failure swallowed —
+    // dispatch sent nothing, so the single attempt is the resolution.
+    expect(sentBodies()).toHaveLength(1);
+    expect(sentBodies()[0].message).toContain('INCIDENT RESOLVED');
   });
 });
 
 describe('SMS ordering, duplicates & failure isolation (regression)', () => {
-  // Production report (classmates testing): the citizen's DISPATCH
-  // UPDATE was handed to TextBee only AFTER the station-alert
-  // round-trip, and nothing ordered it against a quick "Mark En Route"
-  // — so the citizen received the Dispatched and En Route texts at
-  // almost the same time, out of order. Every case below stubs fetch:
-  // no real SMS can leave the suite, and all phones are test-only.
+  // Start/end-only policy: the citizen gets a report confirmation at
+  // creation and a resolution text on Resolved — dispatch and
+  // intermediate statuses send nothing, to any phone. Every case below
+  // stubs fetch: no real SMS can leave the suite, and all phones are
+  // test-only.
   const TEST_KEY = 'test-key-contract-suite';
   const ORIGINAL_KEY = env.TEXTBEE_API_KEY;
   const STATION_ALERT_DELAY_MS = 300;
@@ -885,109 +807,71 @@ describe('SMS ordering, duplicates & failure isolation (regression)', () => {
     }
   }
 
-  it('hands the citizen DISPATCH UPDATE to TextBee before a racing En Route SMS, without waiting out the station alert', async () => {
+  it('dispatch followed by a racing En Route sends no SMS', async () => {
     const token = await loginAs('flood');
 
     // Fire the dispatch WITHOUT waiting, then play the web dashboard:
     // poll the public endpoint until the incident reads "Dispatched"
-    // (the status is written before the SMS work finishes) and click
-    // MARK EN ROUTE immediately — the reported production sequence.
+    // and click MARK EN ROUTE immediately — the sequence that used to
+    // race two texts. Now neither step may text anyone.
     const dispatchReq = dispatchFlood(token, ids.order).then((res) => res);
     await waitForPublicStatus(ids.order, 'Dispatched');
 
     const patch = await patchStatus(token, ids.order, 'En Route');
     expect(patch.status).toBe(200);
-    // Fire-and-forget: wait for all three TextBee submissions to start
-    // (station alert + citizen Dispatched + citizen En Route).
-    await waitForSubmissions(3);
 
     const dispatchRes = await dispatchReq;
     expect(dispatchRes.status).toBe(200);
 
-    const bodies = sentBodies();
-    const indexOfCitizenText = (needle) =>
-      bodies.findIndex((b) => b.recipients.includes(ORDER_CITIZEN) && b.message.includes(needle));
-
-    const dispatchedIdx = indexOfCitizenText('DISPATCH UPDATE');
-    const enRouteIdx = indexOfCitizenText('Status: En Route');
-    expect(dispatchedIdx).toBeGreaterThanOrEqual(0);
-    expect(enRouteIdx).toBeGreaterThanOrEqual(0);
-    // Ordering: Dispatched must reach the gateway first, En Route second.
-    expect(dispatchedIdx).toBeLessThan(enRouteIdx);
-
-    // Latency: the citizen text must not queue behind the station alert.
-    const alert = submissions.find((s) => s.message.includes('DISPATCH ALERT'));
-    const citizen = submissions.find((s) => s.message.includes('DISPATCH UPDATE'));
-    expect(alert).toBeTruthy();
-    expect(citizen).toBeTruthy();
-    expect(citizen.at - alert.at).toBeLessThan(STATION_ALERT_DELAY_MS / 2);
-
-    // Exactly one of each — the race produced no duplicates.
-    expect(messagesTo(ORDER_CITIZEN).filter((m) => m.includes('DISPATCH UPDATE'))).toHaveLength(1);
-    expect(messagesTo(ORDER_CITIZEN).filter((m) => m.includes('Status: En Route'))).toHaveLength(1);
-    expect(stationAlerts()).toHaveLength(1);
+    // Give any (incorrect) background SMS a moment to appear.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(submissions).toHaveLength(0);
+    expect(messagesTo(ORDER_CITIZEN)).toHaveLength(0);
+    expect(stationAlerts()).toHaveLength(0);
   });
 
-  it('keeps the creation confirmation ahead of the dispatch texts for the same incident', async () => {
+  it('the creation confirmation is the only SMS when a dispatch follows', async () => {
     const created = await request(app)
       .post('/api/incidents')
       .send({ ...makeIncident('Flood'), citizenPhone: FRESH_CITIZEN });
     expect(created.status).toBe(201);
+    await waitForSubmissions(1);
 
     const token = await loginAs('flood');
     const dispatchRes = await dispatchFlood(token, created.body.data.incidentId);
     expect(dispatchRes.status).toBe(200);
-    await waitForSubmissions(3);
+    await new Promise((resolve) => setTimeout(resolve, 50));
 
     const msgs = messagesTo(FRESH_CITIZEN);
-    const receivedIdx = msgs.findIndex((m) => m.includes('has been received'));
-    const dispatchedIdx = msgs.findIndex((m) => m.includes('DISPATCH UPDATE'));
-    expect(receivedIdx).toBeGreaterThanOrEqual(0);
-    expect(dispatchedIdx).toBeGreaterThan(receivedIdx);
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0]).toContain('has been received');
   });
 
-  it('dispatch sends one station alert + one citizen text, and En Route adds only En Route content', async () => {
+  it('dispatch and En Route send no SMS at all', async () => {
     const token = await loginAs('flood');
 
     const dispatchRes = await dispatchFlood(token, ids.counts);
     expect(dispatchRes.status).toBe(200);
-    await waitForSubmissions(2);
-    expect(stationAlerts()).toHaveLength(1);
-    expect(messagesTo(COUNTS_CITIZEN).filter((m) => m.includes('DISPATCH UPDATE'))).toHaveLength(1);
 
     const patch = await patchStatus(token, ids.counts, 'En Route');
     expect(patch.status).toBe(200);
-    await waitForSubmissions(3);
 
-    const citizenMsgs = messagesTo(COUNTS_CITIZEN);
-    expect(citizenMsgs).toHaveLength(2);
-    expect(citizenMsgs.filter((m) => m.includes('Status: Dispatched'))).toHaveLength(1);
-
-    const enRoute = citizenMsgs.find((m) => m.includes('Status: En Route'));
-    expect(enRoute).toBeTruthy();
-    // The En Route transition must never re-send a Dispatched message.
-    expect(enRoute).not.toContain('DISPATCH UPDATE');
-    expect(enRoute).not.toContain('Status: Dispatched');
-    // The station is alerted once per dispatch, not per status change.
-    expect(stationAlerts()).toHaveLength(1);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(submissions).toHaveLength(0);
+    expect(messagesTo(COUNTS_CITIZEN)).toHaveLength(0);
+    expect(stationAlerts()).toHaveLength(0);
   });
 
-  it('full lifecycle delivers all four citizen texts: received, dispatched, en route, resolved', async () => {
-    // Production incident INC-20261010-1911: Pending, Dispatched and
-    // Resolved arrived but En Route did not, while TextBee showed the
-    // En Route send as accepted ("Handed to phone"). This pins the
-    // backend half of that sequence — every genuine transition from
-    // creation through resolution hands exactly one SMS to TextBee, in
-    // order, with the En Route text using the STATUS UPDATE template.
-    // (Acceptance by TextBee is not handset delivery; a missing handset
-    // text with a recorded gateway submission is a gateway/carrier
-    // matter, not a skipped backend notification.)
+  it('full lifecycle produces exactly two citizen SMS: confirmation then resolution', async () => {
+    // Start/end-only policy: creation confirms, resolution closes, and
+    // dispatch plus intermediate statuses stay silent — in order.
     const LIFECYCLE_CITIZEN = '+639170002011';
     const created = await request(app)
       .post('/api/incidents')
       .send({ ...makeIncident('Flood'), citizenPhone: LIFECYCLE_CITIZEN });
     expect(created.status).toBe(201);
     const incidentId = created.body.data.incidentId;
+    await waitForSubmissions(1);
 
     const token = await loginAs('flood');
     const dispatchRes = await dispatchFlood(token, incidentId);
@@ -998,61 +882,45 @@ describe('SMS ordering, duplicates & failure isolation (regression)', () => {
 
     const resolved = await patchStatus(token, incidentId, 'Resolved');
     expect(resolved.status).toBe(200);
-
-    // 1 creation + 2 dispatch (station alert + citizen) + 1 En Route + 1 Resolved.
-    await waitForSubmissions(5);
+    await waitForSubmissions(2);
 
     const citizenMsgs = messagesTo(LIFECYCLE_CITIZEN);
-    expect(citizenMsgs).toHaveLength(4);
-    const receivedIdx = citizenMsgs.findIndex((m) => m.includes('has been received'));
-    const dispatchedIdx = citizenMsgs.findIndex((m) => m.includes('DISPATCH UPDATE'));
-    const enRouteIdx = citizenMsgs.findIndex((m) => m.includes('Status: En Route'));
-    const resolvedIdx = citizenMsgs.findIndex((m) => m.includes('INCIDENT RESOLVED'));
-    expect(receivedIdx).toBe(0);
-    expect(dispatchedIdx).toBeGreaterThan(receivedIdx);
-    expect(enRouteIdx).toBeGreaterThan(dispatchedIdx);
-    expect(resolvedIdx).toBeGreaterThan(enRouteIdx);
+    expect(citizenMsgs).toHaveLength(2);
+    expect(citizenMsgs[0]).toContain('has been received');
+    expect(citizenMsgs[1]).toContain('INCIDENT RESOLVED');
+    expect(citizenMsgs[1]).toContain(`Incident: ${incidentId}`);
 
-    // The En Route text is a STATUS UPDATE for this incident naming the
-    // actual responding station — never skipped, never a re-sent dispatch.
-    const enRouteMsg = citizenMsgs[enRouteIdx];
-    expect(enRouteMsg.split('\n')[1]).toBe('STATUS UPDATE');
-    expect(enRouteMsg).toContain(`Incident: ${incidentId}`);
-    expect(enRouteMsg).toContain('Responding from:\nRiver Park Authority');
-    expect(enRouteMsg).not.toContain('DISPATCH UPDATE');
-    expect(enRouteMsg).not.toContain('INCIDENT RESOLVED');
-
-    // One station alert for the whole lifecycle, no duplicates anywhere.
-    expect(stationAlerts()).toHaveLength(1);
+    // No station text at any point in the lifecycle.
+    expect(stationAlerts()).toHaveLength(0);
   });
 
-  it('repeating the same status update sends no duplicate SMS but still returns 200', async () => {
+  it('repeating the Resolved update sends no duplicate SMS but still returns 200', async () => {
     const token = await loginAs('flood');
 
-    const first = await patchStatus(token, ids.sequencedup, 'En Route');
+    const first = await patchStatus(token, ids.sequencedup, 'Resolved');
     expect(first.status).toBe(200);
     await waitForSubmissions(1);
     expect(messagesTo(SEQUENCEDUP_CITIZEN)).toHaveLength(1);
 
-    const second = await patchStatus(token, ids.sequencedup, 'En Route');
+    const second = await patchStatus(token, ids.sequencedup, 'Resolved');
     expect(second.status).toBe(200);
     expect(second.body.success).toBe(true);
-    expect(second.body.data.status).toBe('En Route');
+    expect(second.body.data.status).toBe('Resolved');
     // Give any (incorrect) second send a moment to appear before asserting.
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(messagesTo(SEQUENCEDUP_CITIZEN)).toHaveLength(1);
   });
 
-  it('two racing status updates for the same transition send exactly one SMS', async () => {
+  it('two racing Resolved updates send exactly one SMS', async () => {
     const token = await loginAs('flood');
     const [a, b] = await Promise.all([
-      patchStatus(token, ids.racedup, 'En Route'),
-      patchStatus(token, ids.racedup, 'En Route'),
+      patchStatus(token, ids.racedup, 'Resolved'),
+      patchStatus(token, ids.racedup, 'Resolved'),
     ]);
     expect(a.status).toBe(200);
     expect(b.status).toBe(200);
-    expect(a.body.data.status).toBe('En Route');
-    expect(b.body.data.status).toBe('En Route');
+    expect(a.body.data.status).toBe('Resolved');
+    expect(b.body.data.status).toBe('Resolved');
     await waitForSubmissions(1);
     expect(messagesTo(RACEDUP_CITIZEN)).toHaveLength(1);
   });
@@ -1076,7 +944,7 @@ describe('SMS ordering, duplicates & failure isolation (regression)', () => {
       }
     );
 
-    const fail = await patchStatus(token, ids.buildfail, 'En Route');
+    const fail = await patchStatus(token, ids.buildfail, 'Resolved');
     expect(fail.status).toBe(500);
     expect(messagesTo(BUILDFAIL_CITIZEN)).toHaveLength(0);
 
@@ -1085,21 +953,21 @@ describe('SMS ordering, duplicates & failure isolation (regression)', () => {
     const unchanged = await request(app).get(`/api/incidents/${ids.buildfail}`);
     expect(unchanged.body.data.status).toBe('Pending');
 
-    const retry = await patchStatus(token, ids.buildfail, 'En Route');
+    const retry = await patchStatus(token, ids.buildfail, 'Resolved');
     expect(retry.status).toBe(200);
     await waitForSubmissions(1);
     expect(
-      messagesTo(BUILDFAIL_CITIZEN).filter((m) => m.includes('Status: En Route'))
+      messagesTo(BUILDFAIL_CITIZEN).filter((m) => m.includes('INCIDENT RESOLVED'))
     ).toHaveLength(1);
 
     // Further repeats stay deduplicated — the retry consumed the claim.
-    const third = await patchStatus(token, ids.buildfail, 'En Route');
+    const third = await patchStatus(token, ids.buildfail, 'Resolved');
     expect(third.status).toBe(200);
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(messagesTo(BUILDFAIL_CITIZEN)).toHaveLength(1);
   });
 
-  it('two concurrent DIFFERENT status updates announce each transition exactly once', async () => {
+  it('two concurrent intermediate status updates send no SMS', async () => {
     const token = await loginAs('flood');
     const [a, b] = await Promise.all([
       patchStatus(token, ids.concurrent, 'Dispatched'),
@@ -1108,29 +976,23 @@ describe('SMS ordering, duplicates & failure isolation (regression)', () => {
     expect(a.status).toBe(200);
     expect(b.status).toBe(200);
 
-    // Whatever interleaving the race produced, each transition is
-    // announced exactly once: the claims are independent per status
-    // and neither announcement is lost or duplicated.
-    await waitForSubmissions(2);
-    const msgs = messagesTo(CONCURRENT_CITIZEN);
-    expect(msgs.filter((m) => m.includes('Status: Dispatched'))).toHaveLength(1);
-    expect(msgs.filter((m) => m.includes('Status: En Route'))).toHaveLength(1);
-    expect(msgs).toHaveLength(2);
+    // Both transitions are recorded without texting anyone.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(submissions).toHaveLength(0);
+    expect(messagesTo(CONCURRENT_CITIZEN)).toHaveLength(0);
   });
 
-  it('PATCH "Dispatched" right after dispatch does not send a second dispatch text', async () => {
+  it('dispatch followed by a Dispatched PATCH sends no SMS', async () => {
     const token = await loginAs('flood');
     const dispatchRes = await dispatchFlood(token, ids.nodup);
     expect(dispatchRes.status).toBe(200);
-    await waitForSubmissions(2);
-    expect(messagesTo(NODEDUP_CITIZEN).filter((m) => m.includes('DISPATCH UPDATE'))).toHaveLength(1);
 
     const patch = await patchStatus(token, ids.nodup, 'Dispatched');
     expect(patch.status).toBe(200);
     expect(patch.body.data.status).toBe('Dispatched');
-    // No extra text of any kind — the dispatch announcement stands alone.
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    expect(messagesTo(NODEDUP_CITIZEN)).toHaveLength(1);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(submissions).toHaveLength(0);
+    expect(messagesTo(NODEDUP_CITIZEN)).toHaveLength(0);
   });
 
   it('a TextBee timeout never fails the dispatch and the ordered queue keeps flowing', async () => {
@@ -1141,54 +1003,63 @@ describe('SMS ordering, duplicates & failure isolation (regression)', () => {
     expect(dispatchRes.status).toBe(200);
     expect(dispatchRes.body.success).toBe(true);
     expect(dispatchRes.body.data.status).toBe('Dispatched');
-    await waitForSubmissions(2);
+    // Dispatch sends nothing, so the timeout mode changes nothing here.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(submissions).toHaveLength(0);
 
-    // The failed link must not wedge the chain: the next transition
-    // still hands its SMS to TextBee.
+    // The resolution still hands its SMS to TextBee once the provider
+    // recovers — the failed mode must not wedge the chain.
     mode = 'ok';
-    const patch = await patchStatus(token, ids.timeout, 'En Route');
+    const patch = await patchStatus(token, ids.timeout, 'Resolved');
     expect(patch.status).toBe(200);
-    expect(patch.body.data.status).toBe('En Route');
-    await waitForSubmissions(3);
-    expect(messagesTo(TIMEOUT_CITIZEN).filter((m) => m.includes('Status: En Route'))).toHaveLength(1);
+    expect(patch.body.data.status).toBe('Resolved');
+    await waitForSubmissions(1);
+    expect(messagesTo(TIMEOUT_CITIZEN).filter((m) => m.includes('INCIDENT RESOLVED'))).toHaveLength(1);
   });
 
   it('a TextBee HTTP 500 never fails a status update', async () => {
     mode = 'http500';
     const token = await loginAs('flood');
 
-    const patch = await patchStatus(token, ids.httpfail, 'En Route');
+    const patch = await patchStatus(token, ids.httpfail, 'Resolved');
     expect(patch.status).toBe(200);
     expect(patch.body.success).toBe(true);
-    expect(patch.body.data.status).toBe('En Route');
+    expect(patch.body.data.status).toBe('Resolved');
     await waitForSubmissions(1);
     // The send was ATTEMPTED and its failure swallowed — not dropped silently.
-    expect(messagesTo(HTTPFAIL_CITIZEN).filter((m) => m.includes('Status: En Route'))).toHaveLength(1);
+    expect(messagesTo(HTTPFAIL_CITIZEN).filter((m) => m.includes('INCIDENT RESOLVED'))).toHaveLength(1);
   });
 
   it('HTTP responses return without waiting on a slow TextBee round-trip', async () => {
-    // Gate TextBee so the provider hang lasts until the test releases it.
     // Absolute wall-clock budgets are unreliable here: CI contract tests
     // run against live Firebase RTDB, and findById+updateStatus alone can
     // exceed several hundred ms. The real property is that the HTTP path
-    // never awaits the SMS job — if it did, this request would deadlock
-    // on the closed gate (vitest timeout) instead of returning 200.
+    // never awaits the SMS job — so TextBee is gated shut instead: if the
+    // PATCH awaited the resolution send, this request would deadlock on
+    // the closed gate (vitest timeout) instead of returning 200.
+    const token = await loginAs('flood');
+    const created = await request(app)
+      .post('/api/incidents')
+      .send({ ...makeIncident('Flood'), citizenPhone: '+639170002012' });
+    expect(created.status).toBe(201);
+    const incidentId = created.body.data.incidentId;
+    await waitForSubmissions(1);
+
     let releaseTextbee;
     textbeeGate = new Promise((resolve) => {
       releaseTextbee = resolve;
     });
     mode = 'gated';
-    const token = await loginAs('flood');
 
-    const patch = await patchStatus(token, ids.httpfail, 'Dispatched');
+    const patch = await patchStatus(token, incidentId, 'Resolved');
     expect(patch.status).toBe(200);
-    expect(patch.body.data.status).toBe('Dispatched');
+    expect(patch.body.data.status).toBe('Resolved');
 
     // Gate still closed: the 200 returned while TextBee was hung.
     releaseTextbee();
-    await waitForSubmissions(1);
+    await waitForSubmissions(2);
     expect(
-      messagesTo(HTTPFAIL_CITIZEN).filter((m) => m.includes('Status: Dispatched'))
+      messagesTo('+639170002012').filter((m) => m.includes('INCIDENT RESOLVED'))
     ).toHaveLength(1);
   });
 
