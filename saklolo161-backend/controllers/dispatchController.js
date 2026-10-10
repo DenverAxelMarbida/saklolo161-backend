@@ -13,6 +13,7 @@
 const incidentService = require('../services/incidentService');
 const stationService = require('../services/stationService');
 const textbeeService = require('../services/textbeeService');
+const smsQueue = require('../services/smsQueue');
 const { getRoute } = require('../services/routingService');
 
 /**
@@ -100,40 +101,69 @@ async function dispatchIncident(req, res, next) {
     await incidentService.updateStatus(incidentId, 'Dispatched');
 
     // Compute a real driving ETA from the same routing service the web
-    // dashboard uses whenever both coordinates exist, so the citizen SMS
-    // and the mobile tracker show arrival time — never the station's
-    // canned readiness string, which can be wildly short when a unit is
-    // dispatched across town.
-    const arrivalEtaMinutes = await computeArrivalEta(station, incident.location);
+    // dashboard uses (so the citizen SMS and the mobile tracker show
+    // arrival time — never the station's canned readiness string, which
+    // can be wildly short when a unit is dispatched across town) and
+    // persist the dispatch/station blocks — but as promises started
+    // NOW, not awaited yet. The SMS job below is queued before either
+    // resolves because enqueue ORDER is what guarantees the citizen's
+    // Dispatched text is handed to TextBee ahead of any status text
+    // queued after it (e.g. a racing "Mark En Route").
+    const etaPromise = computeArrivalEta(station, incident.location);
+    const updatedPromise = (async () => {
+      const arrivalEtaMinutes = await etaPromise;
 
-    const dispatchBlock = {
-      stationId: station.id,
-      stationName: station.name,
-      assignedUnit,
-      estimatedTurnout: station.estimatedTurnout,
-      dispatchedAt: new Date().toISOString(),
-    };
-    if (arrivalEtaMinutes) dispatchBlock.arrivalEtaMinutes = arrivalEtaMinutes;
+      const dispatchBlock = {
+        stationId: station.id,
+        stationName: station.name,
+        assignedUnit,
+        estimatedTurnout: station.estimatedTurnout,
+        dispatchedAt: new Date().toISOString(),
+      };
+      if (arrivalEtaMinutes) dispatchBlock.arrivalEtaMinutes = arrivalEtaMinutes;
 
-    // Contract anchor: the responding station is exposed at the TOP
-    // level (`incident.station.coords`), not nested under dispatch.
-    const stationBlock = {
-      id: station.id,
-      name: station.name,
-      coords: station.coords || null,
-    };
+      // Contract anchor: the responding station is exposed at the TOP
+      // level (`incident.station.coords`), not nested under dispatch.
+      const stationBlock = {
+        id: station.id,
+        name: station.name,
+        coords: station.coords || null,
+      };
 
-    // Persist both blocks via the service (mutating the returned
-    // record directly only lands in the mock store — RTDB re-reads
-    // are plain objects). Returns the persisted incident.
-    const updated = await incidentService.attachDispatch(incidentId, {
-      dispatch: dispatchBlock,
-      station: stationBlock,
-    });
+      // Persist both blocks via the service (mutating the returned
+      // record directly only lands in the mock store — RTDB re-reads
+      // are plain objects). Returns the persisted incident.
+      return incidentService.attachDispatch(incidentId, {
+        dispatch: dispatchBlock,
+        station: stationBlock,
+      });
+    })();
 
     // ---- 6. Notify station + citizen (textbeeService — best-effort) ----
-    await notifyStation(station, updated, assignedUnit);
-    await notifyCitizen(updated, station, assignedUnit);
+    // Claim "Dispatched" for this incident so no later status PATCH can
+    // announce it a second time, then queue ONE job on this incident's
+    // ordered SMS chain. The job resolves the dispatch record itself, so
+    // its place in the chain is fixed immediately even while the ETA /
+    // attach writes are still in flight.
+    smsQueue.claimAnnouncement(incidentId, 'Dispatched');
+    // Fire-and-forget: the queue promise never rejects, so the 200 can
+    // return after the dispatch write without waiting on TextBee.
+    // FIFO still orders this Dispatched text ahead of any later status
+    // text for the same incident.
+    smsQueue.enqueue(incidentId, async () => {
+      const persisted = await updatedPromise;
+      // Station alert and citizen update start TOGETHER: the citizen's
+      // text must never queue behind the station's round-trip. Both are
+      // best-effort — sendSms() never rejects, and the chain swallows
+      // anything a message builder could throw, so SMS can never fail
+      // the dispatch.
+      await Promise.all([
+        notifyStation(station, persisted, assignedUnit),
+        notifyCitizen(persisted, station, assignedUnit),
+      ]);
+    });
+
+    const updated = await updatedPromise;
 
     return res.status(200).json({
       success: true,

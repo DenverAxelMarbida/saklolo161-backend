@@ -11,6 +11,7 @@ const incidentService = require('../services/incidentService');
 const mapboxService = require('../services/mapboxService');
 const stationService = require('../services/stationService');
 const textbeeService = require('../services/textbeeService');
+const smsQueue = require('../services/smsQueue');
 
 const VALID_STATUSES = ['Pending', 'Dispatched', 'En Route', 'Resolved'];
 
@@ -79,10 +80,17 @@ async function createIncident(req, res, next) {
 
     await incidentService.add(newIncident);
 
-    // Fire-and-forget confirmation SMS to the citizen (TextBee).
-    textbeeService.sendSms(
-      citizenPhone,
-      `Saklolo 161: Your ${category} report (${newIncident.incidentId}) has been received. Help is on the way.`
+    // Fire-and-forget confirmation SMS to the citizen (TextBee) — still
+    // not awaited, so the 201 never waits on the gateway, but enqueued
+    // on this incident's ordered SMS chain so the confirmation can never
+    // be submitted AFTER a dispatch/status text queued later. The chain
+    // promise never rejects, so this can't become an unhandled
+    // rejection either.
+    smsQueue.enqueue(newIncident.incidentId, () =>
+      textbeeService.sendSms(
+        citizenPhone,
+        `Saklolo 161: Your ${category} report (${newIncident.incidentId}) has been received. Help is on the way.`
+      )
     );
 
     return res.status(201).json({
@@ -195,8 +203,9 @@ async function resolveRespondingStationName(incident) {
  * Builds the plain-text status-notification SMS. One template per
  * outcome — INCIDENT RESOLVED for Resolved, otherwise STATUS UPDATE
  * carrying the incident id, the new status, and the ACTUAL responding
- * station (via resolveRespondingStationName). Triggers are unchanged:
- * exactly one SMS per status change, as before.
+ * station (via resolveRespondingStationName). Trigger (see
+ * updateIncidentStatus below): exactly one SMS per ACTUAL status
+ * transition, never a repeat of an already-announced status.
  */
 async function buildStatusSms(incident, status) {
   if (status === 'Resolved') {
@@ -253,6 +262,30 @@ async function updateIncidentStatus(req, res, next) {
       });
     }
 
+    // Notify the citizen of the status change (TextBee). Two deliberate,
+    // regression-tested rules gate the send:
+    //   1. only an ACTUAL status transition is announced (a PATCH that
+    //      changes nothing is a no-op for SMS);
+    //   2. at most one announcement per (incident, status) — the claim
+    //      is synchronous, so a double-click / retry / racing duplicate
+    //      PATCH still yields exactly one SMS.
+    // Either way the response stays 200 with the normal envelope.
+    //
+    // ORDER MATTERS: the message is built BEFORE the write and before
+    // the claim. A transient construction failure therefore surfaces
+    // as a 500 with nothing persisted and no claim consumed — the same
+    // PATCH can simply be retried and will announce normally (building
+    // first cannot change the content: buildStatusSms only reads the
+    // incident id and responding-station fields, which this write does
+    // not touch). The claim + enqueue still run in the same synchronous
+    // stretch right after the write, so submission order to TextBee
+    // continues to match the order the status changes were persisted —
+    // an En Route text can never overtake an in-flight Dispatched text.
+    const statusChanged = incident.status !== status;
+    const statusSms = statusChanged
+      ? await buildStatusSms(incident, status)
+      : null;
+
     const updated = await incidentService.updateStatus(id, status);
 
     // incidentService.updateStatus() persists resolvedAt on Resolved, so
@@ -264,11 +297,18 @@ async function updateIncidentStatus(req, res, next) {
       updated.resolvedAt = new Date().toISOString();
     }
 
-    // Notify the citizen of the status change (TextBee) — same single
-    // awaited trigger as before; buildStatusSms() picks the template
-    // and resolves the actual responding station (never a default).
-    const statusSms = await buildStatusSms(updated, status);
-    await textbeeService.sendSms(updated.citizenPhone, statusSms);
+    if (statusChanged && smsQueue.claimAnnouncement(id, status)) {
+      // Fire-and-forget: enqueue never rejects, so the 200 returns
+      // without waiting on TextBee. FIFO + claim still guarantee order
+      // and exactly-once per (incident, status).
+      smsQueue.enqueue(id, () =>
+        textbeeService.sendSms(updated.citizenPhone, statusSms)
+      );
+    } else {
+      console.info(
+        `incidentController: SMS for status "${status}" skipped on ${id} — status unchanged or already announced.`
+      );
+    }
 
     return res.status(200).json({
       success: true,
