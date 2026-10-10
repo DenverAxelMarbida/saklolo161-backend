@@ -734,6 +734,8 @@ describe('SMS ordering, duplicates & failure isolation (regression)', () => {
   let fetchSpy;
   let submissions;
   let mode;
+  let textbeeGate;
+  let textbeeGatePhone;
   let infoSpy;
   let errorSpy;
 
@@ -766,6 +768,8 @@ describe('SMS ordering, duplicates & failure isolation (regression)', () => {
     errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     submissions = [];
     mode = 'ok';
+    textbeeGate = null;
+    textbeeGatePhone = null;
     fetchSpy = vi.fn(async (url, init) => {
       // mapboxService.reverseGeocode also calls the global fetch with a
       // single argument — keep it on the same non-authorized fallback
@@ -775,7 +779,13 @@ describe('SMS ordering, duplicates & failure isolation (regression)', () => {
         return { ok: false, status: 401, json: async () => ({ message: 'No Token' }) };
       }
       const body = JSON.parse(init.body);
-      submissions.push({ recipients: body.recipients, message: body.message, at: Date.now() });
+      const entry = {
+        recipients: body.recipients,
+        message: body.message,
+        at: Date.now(),
+        completed: false,
+      };
+      submissions.push(entry);
       if (mode === 'timeout') {
         const timeoutError = new Error('The operation was aborted due to timeout');
         timeoutError.name = 'TimeoutError';
@@ -789,11 +799,18 @@ describe('SMS ordering, duplicates & failure isolation (regression)', () => {
       if (body.message.includes('DISPATCH ALERT')) {
         await new Promise((resolve) => setTimeout(resolve, STATION_ALERT_DELAY_MS));
       }
-      // Slow provider: hang before responding so we can prove the HTTP
-      // response path does not wait on TextBee.
-      if (mode === 'slow') {
-        await new Promise((resolve) => setTimeout(resolve, 400));
+      // Gated provider: hang until the test releases the gate. If an
+      // HTTP handler awaited this SMS job, the request would deadlock
+      // (vitest timeout) — so a completed HTTP response while the gate
+      // is still closed is proof of non-blocking SMS.
+      if (
+        mode === 'gated' &&
+        textbeeGate &&
+        (!textbeeGatePhone || body.recipients.includes(textbeeGatePhone))
+      ) {
+        await textbeeGate;
       }
+      entry.completed = true;
       return {
         ok: true,
         status: 200,
@@ -1096,18 +1113,25 @@ describe('SMS ordering, duplicates & failure isolation (regression)', () => {
   });
 
   it('HTTP responses return without waiting on a slow TextBee round-trip', async () => {
-    mode = 'slow';
+    // Gate TextBee so the provider hang lasts until the test releases it.
+    // Absolute wall-clock budgets are unreliable here: CI contract tests
+    // run against live Firebase RTDB, and findById+updateStatus alone can
+    // exceed several hundred ms. The real property is that the HTTP path
+    // never awaits the SMS job — if it did, this request would deadlock
+    // on the closed gate (vitest timeout) instead of returning 200.
+    let releaseTextbee;
+    textbeeGate = new Promise((resolve) => {
+      releaseTextbee = resolve;
+    });
+    mode = 'gated';
     const token = await loginAs('flood');
 
-    const start = Date.now();
     const patch = await patchStatus(token, ids.httpfail, 'Dispatched');
-    const elapsedMs = Date.now() - start;
     expect(patch.status).toBe(200);
     expect(patch.body.data.status).toBe('Dispatched');
-    // Provider hang is 400ms; the HTTP path must not sit on it.
-    expect(elapsedMs).toBeLessThan(300);
 
-    // The SMS still goes out in the background.
+    // Gate still closed: the 200 returned while TextBee was hung.
+    releaseTextbee();
     await waitForSubmissions(1);
     expect(
       messagesTo(HTTPFAIL_CITIZEN).filter((m) => m.includes('Status: Dispatched'))
@@ -1115,32 +1139,58 @@ describe('SMS ordering, duplicates & failure isolation (regression)', () => {
   });
 
   it('a stuck TextBee send on one incident does not block another incident', async () => {
-    mode = 'slow';
+    // Gate ONLY the first incident's citizen SMS. The second incident's
+    // chain is independent, so its SMS must still reach TextBee while
+    // the first is stuck — without any absolute time limit (live
+    // Firebase latency varies by runner and must not fail this test).
+    let releaseOrderSms;
+    textbeeGate = new Promise((resolve) => {
+      releaseOrderSms = resolve;
+    });
+    textbeeGatePhone = ORDER_CITIZEN;
+    mode = 'gated';
     const token = await loginAs('flood');
 
-    // Concurrent patches on two incidents. Per-incident FIFO chains mean
-    // incident A's 400ms TextBee hang must not delay incident B's SMS.
-    const start = Date.now();
     const [a, b] = await Promise.all([
       patchStatus(token, ids.order, 'Resolved'),
       patchStatus(token, ids.counts, 'Resolved'),
     ]);
-    const elapsedMs = Date.now() - start;
     expect(a.status).toBe(200);
     expect(b.status).toBe(200);
-    // Provider hang is 400ms; two concurrent supertest + store writes
-    // add jitter, so allow headroom while still proving HTTP did not
-    // wait out the TextBee hang.
-    expect(elapsedMs).toBeLessThan(380);
 
-    // Both background sends still complete (A already claimed Dispatched→En Route
-    // earlier in the suite for order; Resolved is a new transition).
-    await waitForSubmissions(2);
+    const completedTo = (phone) =>
+      submissions
+        .filter((s) => s.completed && s.recipients.includes(phone))
+        .map((s) => s.message);
+
+    // B's SMS completes while A's is still gated at the provider.
+    for (let attempt = 0; attempt < 200; attempt++) {
+      if (completedTo(COUNTS_CITIZEN).some((m) => m.includes('Status: Resolved'))) {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    expect(
+      completedTo(COUNTS_CITIZEN).filter((m) => m.includes('Status: Resolved'))
+    ).toHaveLength(1);
+    // A's fetch was called (submission recorded) but the gateway call
+    // has not completed — it is still sitting on the closed gate.
+    expect(
+      completedTo(ORDER_CITIZEN).filter((m) => m.includes('Status: Resolved'))
+    ).toHaveLength(0);
     expect(
       messagesTo(ORDER_CITIZEN).filter((m) => m.includes('Status: Resolved'))
     ).toHaveLength(1);
+
+    releaseOrderSms();
+    for (let attempt = 0; attempt < 200; attempt++) {
+      if (completedTo(ORDER_CITIZEN).some((m) => m.includes('Status: Resolved'))) {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
     expect(
-      messagesTo(COUNTS_CITIZEN).filter((m) => m.includes('Status: Resolved'))
+      completedTo(ORDER_CITIZEN).filter((m) => m.includes('Status: Resolved'))
     ).toHaveLength(1);
   });
 });
