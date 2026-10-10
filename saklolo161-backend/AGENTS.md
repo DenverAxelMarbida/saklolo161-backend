@@ -28,20 +28,30 @@ haven't necessarily been in every session.
   endpoints: `GET /api/weather-river` (10-min cache), `GET /api/incidents`,
   `POST /api/incidents`, `POST /api/incidents/dispatch`,
   `PATCH /api/incidents/:id/status`.
-- **Phase 2 (done):** Staff auth (JWT, decoupled from Firebase via
-  `services/authService.js`), agency-scoped authorization, per-phone
-  rate limiting, `elapsedMinutes` — merged and live.
-- **Phase 3 (in progress):** Done and **live on Render** (verified
-  2026-09-08): incident service layer (`services/incidentService.js`),
-  real PAGASA river feed (pinned TLS, `source: "pagasa"|"mock"`),
-  real routing (`GET /api/routes` + Mapbox), evidence upload
-  (`POST /api/incidents/:id/evidence`), and the 15-case contract test
-  suite wired into CI. **Held as a coordinated window:** the Firebase
-  cutover (RTDB + Auth) and TextBee-led inter-agency sends (task 5).
+- **Phase 2 (done):** Staff auth, agency-scoped authorization, per-phone
+  rate limiting, `elapsedMinutes`, dispatcher `"Mark En Route"` action —
+  merged and live.
+- **Phase 3 (done, live on Render):** incident service layer
+  (`services/incidentService.js`), real PAGASA river feed (pinned TLS,
+  `source: "pagasa"|"mock"`), real routing (`GET /api/routes` +
+  Mapbox), evidence upload (`POST /api/incidents/:id/evidence`) with
+  Firebase Storage download URLs, Firebase RTDB incident storage,
+  Firebase Auth cutover (login returns a Firebase ID token via Auth
+  REST; `verifyToken()` → `verifyIdToken()`), staff User Management
+  API (`GET/POST /api/users`, `PATCH /api/users/:uid`,
+  `PATCH /api/users/:uid/status`, `POST /api/users/me/password`), live
+  TextBee sends, and the contract test suite (57 cases) wired into CI.
   - Task list: `../Phase 3/saklolo161-backend-phase3-tasks.md`
-  - Frozen contract to build against: `../Phase 3/saklolo161-phase3-contracts.md`
+  - Frozen contract: `../Phase 3/saklolo161-phase3-contracts.md`
   - Auth cutover checklist: `../Phase 3/saklolo161-auth-coordination.md`
-  See "Phase 3 migration path" below.
+  (historical — the coordinated window has landed; see "STOP and Ask").
+- **SMS notifications (current policy — start/end only):** the citizen's
+  registered `citizenPhone` gets exactly two texts per incident: the
+  report confirmation at creation and the resolution text on a genuine
+  transition to `Resolved`. Dispatch and intermediate statuses
+  (`Dispatched`, `En Route`) send no SMS to anyone; station contact
+  stays voice-call. All sends go through the per-incident ordered,
+  non-blocking `services/smsQueue.js` (see "Established Patterns").
 
 ## API Contract
 
@@ -51,17 +61,23 @@ haven't necessarily been in every session.
 | `GET /api/incidents/:id` | None — must stay public | Mobile's status-polling endpoint. **Never move this behind auth** — mobile has no login and never will in this architecture. |
 | `GET /api/incidents` | Dispatcher token required | Full list, agency-filtered server-side (`req.user.agency`). Web dashboard only. |
 | `POST /api/incidents/dispatch` | Dispatcher token required | Agency-scoped: a FIRE-agency token can't dispatch a MEDICAL incident. |
-| `PATCH /api/incidents/:id/status` | Dispatcher token required | Accepts any of `Pending/Dispatched/En Route/Resolved`. Generic — no per-status special-casing needed. |
-| `POST /api/auth/login` | Removed in Phase 3 | Phase 2 JWT login only; replaced by Firebase Auth on the web client in the coordinated cutover. |
+| `PATCH /api/incidents/:id/status` | Dispatcher token required | Accepts any of `Pending/Dispatched/En Route/Resolved`. Generic — no per-status special-casing needed. Only a genuine transition to `Resolved` sends a citizen SMS (see SMS policy above). |
+| `POST /api/auth/login` | None (public, rate-limited) | Staff login via Firebase Auth REST; returns a Firebase ID token + `{ uid, email, agency, role }` from custom claims. The web dashboard signs in with the Firebase client SDK directly; this endpoint remains for compatibility and CI smoke tests. |
+| `GET /api/users` | Admin role required | Staff account list (web User Management). |
+| `POST /api/users` | Admin role required | Create staff account `{ email, password, agency, role }`. |
+| `PATCH /api/users/:uid` | Admin role required | Update email / agency / role. |
+| `PATCH /api/users/:uid/status` | Admin role required | Enable / disable an account `{ enabled }`. |
+| `POST /api/users/me/password` | Dispatcher token required | Authenticated user changes their own password. |
 | `GET /api/weather-river` | None | 10-min server-side cache. Gains UI-ignored `source: "pagasa" | "mock"` in Phase 3. |
 | `GET /api/routes` | None — public, rate-limited | Phase 3 (live). Real driving route via Mapbox Directions; straight-line fallback on failure. |
-| `POST /api/incidents/:id/evidence` | None — public, rate-limited | Phase 3 (live). Multipart `file` → `{fileId, url, mimeType, sizeKb, uploadedAt}`; `url` is `""` until the Firebase Storage cutover. |
+| `POST /api/incidents/:id/evidence` | None — public, rate-limited | Phase 3 (live). Multipart `file` → `{fileId, url, mimeType, sizeKb, uploadedAt}`; `url` is the Firebase Storage download URL (absolute). |
 | `POST /api/incidents/:id/evidence-status` | None — public, rate-limited | Additive evidence-progress signal from mobile: `{ evidenceUploading, evidenceExpectedCount, evidenceFailedCount, evidenceAttempt, evidenceAttemptsTotal }`. The two attempt fields are optional non-negative integers (retry-attempt telemetry; both default to 0 on read) and share the endpoint's rate-limit budget with uploads — clients must throttle their own pings. |
 
 **Dispatched incidents expose the responding station at the TOP level:**
 `station: { id, name, coords: { lat, lng } }` — not nested under
-`dispatch`. `dispatch` still carries `stationId`, `assignment`, and the
-SMS payload fields. `evidence: []` is always present (empty when none).
+`dispatch`. `dispatch` still carries `stationId`, `stationName`,
+`assignedUnit`, `estimatedTurnout`, `dispatchedAt`, and
+`arrivalEtaMinutes`. `evidence: []` is always present (empty when none).
 
 **The line that must never move:** `GET /api/incidents/:id` is public
 and `GET /api/incidents` is not. Mobile depends on that split staying
@@ -73,31 +89,37 @@ handler without preserving the auth boundary.
 1. **Never hardcode station duty phone numbers anywhere outside
    `config/env.js`/`config/stations.js`.** Controllers resolve stations
    by ID through `services/stationService.js` only.
-2. **Controllers never import the underlying store or crypto/JWT
-   library directly.** `stationService.js` and (once built)
-   `services/authService.js` are the only files that know about
-   `config/stations.js` or `bcryptjs`/`jsonwebtoken`. This is what
-   makes the Phase 3 Firebase swap a one-file change per concern.
+2. **Controllers never import the underlying store or crypto
+   library directly.** `stationService.js` and `services/authService.js`
+   are the only files that know about `config/stations.js` or the
+   Firebase Admin SDK. This is what made the Phase 3 Firebase swap a
+   one-file change per concern — preserve it.
 3. **This repo does not write frontend code.** If a task seems to need
    a new UI behavior, it needs a new/changed endpoint here that the
    frontend then consumes — flag it rather than reaching into
    `saklolo161-web` or `saklolo161-mobile`.
-4. **Mock data (`data/mockIncidents.js`, `data/mockUsers.js` once
-   built) resets on server restart.** This is a known, accepted Phase 2
-   trade-off — don't "fix" it by adding persistence ahead of the Phase
-   3 Firebase migration.
+4. **Incident storage is Firebase RTDB.** The in-memory mock store
+   (`data/mockIncidents.js`, `data/mockUsers.js`) remains only as a
+   fallback/test path — don't build features against it, and don't
+   "fix" test-only mock behavior by adding production persistence
+   around it.
 
-## STOP and Ask (phase-3 coordination)
+## STOP and Ask (shared infrastructure)
 
 Manual actions that mutate the shared infrastructure or need lead-only
 secrets are **STOP and ask** moments — never do them silently:
 
 - Setting/rotating env on Render (`MAPBOX_ACCESS_TOKEN`,
-  `OPENWEATHER_API_KEY`, `JWT_SECRET`, and the held `FIREBASE_*`,
-  `FIREBASE_DATABASE_URL`, `FIREBASE_CREDENTIALS`, `TEXTBEE_API_KEY`,
-  `TEXTBEE_DEVICE_ID`).
-- Enabling Firebase and the TextBee SMS cutover (Task 5 window only).
+  `OPENWEATHER_API_KEY`, `JWT_SECRET`, `FIREBASE_*`,
+  `FIREBASE_DATABASE_URL`, `FIREBASE_CREDENTIALS`,
+  `TEXTBEE_API_KEY`, `TEXTBEE_DEVICE_ID`).
+- Re-provisioning Firebase Auth accounts or changing custom claims
+  (`agency`/`role`) — the web dashboard's access depends on them.
 - Restarting or redeploying the shared Render instance mid-iteration.
+
+(The Phase 3 Firebase cutover coordinated window has landed — backend
+and web both run Firebase Auth now. There is no pending cutover; treat
+any fresh auth/storage migration as a new STOP-and-ask item.)
 
 **Lead-only secrets** (never request from another dev): Render env,
 Firebase service-account JSON + RTDB URL + Storage rules, TextBee
@@ -112,6 +134,14 @@ handset delivery; the Android phone must stay online and SMS-capable.
 SMS failures stay isolated from incident operations. (The legacy
 Semaphore env vars remain only for a rollback window.)
 
+**SMS policy is start/end only:** per incident, exactly two citizen
+texts — the report confirmation at creation and the resolution text on
+a genuine transition to `Resolved`, both to the registered
+`citizenPhone`. Dispatch and intermediate statuses send nothing to
+anyone; station contact stays voice-call. Sends are ordered per
+incident and non-blocking via `services/smsQueue.js` (see
+"Established Patterns").
+
 ## Established Patterns
 
 - **Service abstraction layer:** `dispatchController.js` never touches
@@ -124,10 +154,24 @@ Semaphore env vars remain only for a rollback window.)
   `incidentController.js` for the convention. New endpoints should
   match this rather than inventing a new shape.
 - **Generic status updates:** `updateIncidentStatus` accepts any value
-  in `VALID_STATUSES` and fires the same SMS-notification code path
-  regardless of which one — there's no per-status special-casing.
-  Don't add a dedicated endpoint per status; the generic one already
-  covers `"En Route"`, etc.
+  in `VALID_STATUSES` — there's no per-status special-casing and no
+  dedicated endpoint per status. Only a genuine transition to
+  `Resolved` sends a citizen SMS; every other status (and any repeat
+  of the current status) still returns the normal 200 envelope with no
+  text. Don't add a dedicated endpoint per status.
+- **Ordered, deduplicated citizen SMS:** the two citizen texts (creation
+  confirmation, resolution) are queued through
+  `services/smsQueue.js` — one FIFO chain per incident, so the
+  resolution is only handed to TextBee after the confirmation, and two
+  concurrent handlers can't submit out of order.
+  `claimAnnouncement(incidentId, status)` records every genuine status
+  transition but only the `Resolved` claim sends: a PATCH that doesn't
+  actually change the status, or repeats the last announced one
+  (double-click, retry, racing duplicate), still returns the normal 200
+  envelope but sends nothing. This is a consecutive-duplicate guard
+  over the last announced status, not a universal
+  one-SMS-per-(incident, status) rule — leaving `Resolved` and coming
+  back sends again. Dispatch itself sends nothing and claims nothing.
 
 ## Frontend Devs Running This Repo Locally
 
@@ -140,59 +184,63 @@ touching this repo's code.
 
 Why it matters more than usual right now:
 
-1. **Unreleased work isn't on Render yet.** `authService.login()`,
-   agency-scoped filtering, rate limiting, and `markEnRoute` support
-   all get built here before they're deployed — there's nothing to
-   test the paired frontend changes against remotely until they land.
+1. **The live instance is shared, not private.** Auth, agency-scoped
+   filtering, rate limiting, routing, evidence, and User Management are
+   all live on Render — but every dev sharing it eats cold-start
+   latency and shares the per-phone rate-limit quota during rapid
+   iteration.
 2. **Render's free tier cold-starts** add latency every dev sharing
    the live instance eats during rapid iteration, not just first load.
-3. **`data/mockIncidents.js` and `data/mockUsers.js` are one shared,
-   resettable in-memory array on the live instance.** Test incidents,
-   test accounts, and dispatch actions from different devs collide in
-   the same pot, and a Render restart wipes everyone's test data at
-   once.
+3. **One backend, one dataset per instance.** Test incidents, test
+   accounts, and dispatch actions from different devs collide in the
+   same pot when sharing one backend — local or live. The live Render
+   instance uses Firebase RTDB/Auth, so its data survives restarts.
+   Local runs need real Firebase credentials too (a service-account
+   file per `.env.example` — the server refuses to start without them,
+   and the in-memory mock store is only a code fallback/test path, not
+   a supported dev mode).
 4. **The per-phone rate limiter (1.5) is shared** across every client
    hitting the same live instance — local backend gives each dev their
    own quota.
 
 Quick start for them: `git clone`, `npm install`, `cp .env.example
-.env` (documented local-dev fallbacks already cover `JWT_SECRET` etc.
-— no real secrets needed), `npm run dev` → `localhost:5000`. Web
+.env` — then fill in real Firebase credentials (service-account file
++ database URL + web API key; the server will not start without them).
+`npm run dev` → `localhost:5000`. Web
 points `VITE_API_BASE_URL` at it; mobile points
 `EXPO_PUBLIC_API_BASE_URL` at the machine's LAN IP (not `localhost`)
 since a phone in Expo Go is a separate device on the network —
 `config/corsOptions.js` already whitelists local network IPs for
 exactly this.
 
-This is also how the web dev tests steps 1.3/1.4 (route protection)
-together with the matching web auth changes (2.1/2.2) before the
-coordinated deploy mentioned above, instead of either side being
-half-broken against a mismatched remote instance.
+A local backend also gives each dev their own per-phone rate-limit
+quota and a private dataset to iterate against, instead of colliding
+with other testers on the live instance.
 
 ## Known Gaps
 
-- **Evidence media is served from local disk until the Firebase Storage
-  cutover.** Uploads land in `uploads/evidence/` (gitignored, wiped on
-  redeploy) and are streamed by the public, rate-limited
-  `GET /api/incidents/:id/evidence/:fileId/media` (Range-capable for
-  video seeking). The stored `url` is a **relative** path so clients
-  resolve it against their own API base (LAN phone / TLS web). The
-  Firebase Storage cutover only changes `evidenceService.uploadEvidenceFile()`
-  to return an absolute download URL — clients already treat a
-  leading-slash `url` as relative and an absolute one as-is.
+- **Evidence media fallback when Storage is unconfigured.** Uploads
+  normally go to Firebase Storage with absolute download URLs; when
+  Firebase isn't configured the metadata is stored in-memory with a
+  placeholder URL (still 200, client flow intact). Don't rely on that
+  fallback for anything beyond local smoke testing.
 - **The PAGASA feed TLS pin** (`config/pagasa-ca.pem`) could break if
   DOST-PAGASA rotates its certificate chain — regenerate it with
   `node scripts/refresh-pagasa-ca.js` when `source` flips to `mock`.
 - `dispatchController.js`'s station/incident category match is a
   direct string comparison after normalization — confirm case handling
   stays consistent if new categories are ever added.
-- The web dashboard's `"Mark En Route"` action (Phase 2 §2.6) is now the
-  only trigger for `"En Route"`; no GPS/telemetry detection exists yet
+- The web dashboard's `"Mark En Route"` action is the only trigger for
+  `"En Route"`; no GPS/telemetry detection exists yet
   (held — needs a responder client to generate telemetry).
-- Task 5 (Firebase RTDB + Auth + TextBee inter-agency sends) is
-  deliberately NOT shipped — it is a coordinated window with the web
-  `auth.js` swap. `authService.js` still issues JWTs against
-  `data/mockUsers.js`.
+- **Contract-suite load vs. live Firebase Auth.** The suite logs in
+  dozens of times per run against the real Auth REST API; rapid
+  repeat runs have throttled into transient 401s/timeouts in
+  `loginAs`-dependent tests. Space full-suite runs a few minutes
+  apart; a lone failure in an untouched auth-adjacent test with a
+  green re-run is flakes, not product.
+- `mapboxService.reverseGeocode` has no fetch timeout (robustness gap,
+  out of scope of the SMS work).
 
 ## Post-Phase-3 Backlog (QA hardening — do NOT start until Task 5's window passes)
 
@@ -219,21 +267,17 @@ signal (`rising/steady/falling` from `wl` vs `wl30m/wl1h/wl2h`) is cheap
 to add but only worth it when a client genuinely needs early-warning
 behavior. Slot it behind these three.
 
-## Phase 3 Migration Path
+## Phase 3 Migration Path (completed — reference only)
 
-| Layer | Phase 2 | Phase 3 | Files touched |
-|---|---|---|---|
-| Incident storage | `data/mockIncidents.js` in-memory | Firebase RTDB | `incidentController.js`'s data calls |
-| Station storage | `config/stations.js` static, `stationService.js` already Firebase-ready | Firebase RTDB `/stations` node | None — `stationService.js` already branches on `getDb()` |
-| User storage | `data/mockUsers.js` in-memory | Firebase Auth user records | `authService.js` internals only |
-| Token verification | `authService.verifyToken()` checks JWT | `admin.auth().verifyIdToken()` | `authService.js` only |
-| Everything that calls `authService.verifyToken()` | — | **Unchanged** | None |
+| Layer | Before | After (current) |
+|---|---|---|
+| Incident storage | `data/mockIncidents.js` in-memory | Firebase RTDB (`incidentService.js` branches on `getDb()`) |
+| Station storage | `config/stations.js` static | Firebase RTDB `/stations` node (`stationService.js` already branched — no code change needed) |
+| User storage | `data/mockUsers.js` in-memory | Firebase Auth user records (`userService.js` / `authService.js`) |
+| Token verification | `authService.verifyToken()` checked JWT | `admin.auth().verifyIdToken()` (Firebase ID token) |
+| Login | Issued JWT against mock users | Firebase Auth REST `signInWithPassword`, returns Firebase ID token |
+| Everything that calls `authService.verifyToken()` | — | **Unchanged** |
 
-Uncomment the real `admin.initializeApp(...)` block in
-`config/firebase.js` once, for both the database and auth surfaces
-together — they share one SDK bootstrap. See
-`../Phase 3/saklolo161-auth-coordination.md` for the full cutover
-checklist (re-provisioning accounts, the scheduled forced re-login,
-what to verify before/after) before running this migration — it is a
-scheduled window paired with the web dev's `auth.js` swap, never a
-silent deploy.
+`config/firebase.js` holds the single shared SDK bootstrap for the
+database and auth surfaces. Any future auth/storage migration is a new
+STOP-and-ask item — do not treat this table as a live plan.
