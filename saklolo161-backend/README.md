@@ -1,8 +1,8 @@
-# Saklolo 161 — Middleware Gateway (Phase 1)
+# Saklolo 161 — Middleware Gateway
 
-Node.js/Express middleware gateway for the **Saklolo 161 Emergency Response System**, a capstone SOA project for Marikina City. This service sits between the React Native mobile app, the React Web Dashboard, Firebase, and external APIs (Mapbox Geocoding, TextBee SMS, Firebase Cloud Messaging).
+Node.js/Express middleware gateway for the **Saklolo 161 Emergency Response System**, a capstone SOA project for Marikina City. This service sits between the React Native mobile app, the React Web Dashboard, Firebase, and external APIs (Mapbox Geocoding/Directions, TextBee SMS, PAGASA river feed).
 
-**Phase 1 status:** Mock mode. Endpoints return realistic fake data so all 5 developers can build UI/logic in parallel without waiting on live Firebase, Mapbox, or TextBee credentials.
+**Status:** live on Render against Firebase RTDB + Firebase Auth, with live TextBee SMS and a 57-case contract test suite in CI (`npm test`). The in-memory mock store remains only as a code fallback/test path.
 
 ---
 
@@ -13,19 +13,46 @@ saklolo161-backend/
 ├── config/
 │   ├── env.js              # Centralized env var loader
 │   ├── corsOptions.js      # Allowed origins for mobile/web dev servers
-│   └── firebase.js         # Firebase Admin init (stubbed for Phase 1)
+│   ├── firebase.js         # Firebase Admin init (RTDB + Auth, one bootstrap)
+│   ├── stations.js         # Static station fallback + phone-number config
+│   └── pagasa-ca.pem       # Pinned TLS cert for the PAGASA feed
 ├── controllers/
-│   └── incidentController.js
+│   ├── incidentController.js
+│   ├── dispatchController.js
+│   ├── authController.js
+│   ├── userController.js
+│   ├── evidenceController.js
+│   ├── routingController.js
+│   └── weatherController.js
 ├── routes/
-│   └── incidentRoutes.js
+│   ├── incidentRoutes.js
+│   ├── authRoutes.js
+│   ├── userRoutes.js
+│   ├── weatherRoutes.js
+│   └── routingRoutes.js
 ├── services/
-│   ├── mapboxService.js    # Reverse geocoding (mocked)
-│   └── textbeeService.js   # SMS notifications (TextBee gateway)
+│   ├── incidentService.js  # RTDB with mock fallback (never import the store directly)
+│   ├── authService.js      # Firebase Auth REST login + verifyIdToken
+│   ├── userService.js      # Staff account admin (Firebase Auth)
+│   ├── stationService.js   # Station lookup (RTDB /stations, static fallback)
+│   ├── mapboxService.js    # Reverse geocoding
+│   ├── routingService.js   # Driving directions (GET /api/routes)
+│   ├── riverService.js     # PAGASA feed with mock degradation
+│   ├── evidenceService.js  # Firebase Storage uploads
+│   ├── smsQueue.js         # Per-incident ordered, non-blocking SMS queue
+│   ├── passwordPolicy.js   # Staff password rules
+│   └── textbeeService.js   # SMS notifications (TextBee gateway, never rejects)
 ├── middlewares/
 │   ├── validateIncident.js # Field validation for POST /api/incidents
+│   ├── verifyAuth.js       # Bearer-token auth + agency scoping
+│   ├── requireAdmin.js     # Admin-role gate for /api/users
+│   ├── rateLimitIncidents.js / rateLimitPublic.js
 │   └── errorHandler.js     # 404 + centralized error handling
 ├── data/
-│   └── mockIncidents.js    # In-memory mock "database" (Phase 1 only)
+│   └── mockIncidents.js    # In-memory fallback store (test path only)
+├── test/
+│   └── contract.test.mjs   # 57-case contract suite (CI)
+├── scripts/                # Provisioning / seed / maintenance scripts
 ├── server.js                # Entry point
 ├── .env.example
 ├── .gitignore
@@ -49,12 +76,23 @@ npm run dev
 
 Server runs at **http://localhost:5000** by default. Visit `http://localhost:5000/` for a health check.
 
-> No real Mapbox/TextBee/Firebase credentials are needed to run Phase 1 — everything runs in mock mode out of the box.
+> Local runs need real Firebase credentials (service-account file +
+> database URL + web API key per `.env.example`) — the server refuses
+> to start without them.
 
 ### SMS provider (TextBee)
 
-SMS notifications (incident creation, status updates, dispatch alerts) go through
-**TextBee** (`services/textbeeService.js`, `POST /api/v1/gateway/send-sms`):
+SMS notifications go through **TextBee**
+(`services/textbeeService.js`, `POST /api/v1/gateway/send-sms`),
+queued per incident via `services/smsQueue.js` (ordered, non-blocking,
+never rejects):
+
+- **Start/end-only policy:** each incident sends exactly two citizen
+  texts, both to the registered `citizenPhone` — the report
+  confirmation at creation and the resolution text on a genuine
+  transition to `Resolved`. Dispatch and intermediate statuses
+  (`Dispatched`, `En Route`) send no SMS to anyone; station contact
+  stays voice-call.
 
 - TextBee **queues** each message to the connected Android device; the phone's
   SIM sends it. An HTTP 200 / `success` result means **accepted/queued — not
@@ -76,24 +114,29 @@ This is the **shared schema** everyone builds against — mobile forms, dashboar
 {
   "incidentId": "INC-YYYYMMDD-XXXX",
   "citizenPhone": "string",
-  "category": "Medical" | "Fire" | "Flood",
+  "category": "Medical" | "Fire" | "Flood" | "Crime",
   "location": {
     "latitude": number,
     "longitude": number,
     "address": "string"
   },
-  "status": "Pending" | "Dispatched" | "Resolved",
+  "status": "Pending" | "Dispatched" | "En Route" | "Resolved",
+  "station": { "id": "string", "name": "string", "coords": { "lat": number, "lng": number } },
+  "dispatch": { "stationId": "string", "assignedUnit": "string", "...": "..." },
+  "evidence": [],
   "notes": "string",
   "timestamp": "ISO String"
 }
 ```
+
+(`station`/`dispatch` appear once dispatched; `evidence` is always present.)
 
 ---
 
 ## 4. API Endpoints
 
 ### `POST /api/incidents`
-Creates a new incident report. Validates required fields, mock reverse-geocodes the address, and (mock) sends an SMS confirmation.
+Creates a new incident report. Validates required fields, reverse-geocodes the address, persists to Firebase RTDB, and queues a confirmation SMS to the citizen.
 
 ```bash
 curl -X POST http://localhost:5000/api/incidents \
@@ -108,7 +151,7 @@ curl -X POST http://localhost:5000/api/incidents \
 Returns `201 Created` with the full incident object (including generated `incidentId` and mocked `address`).
 
 ### `GET /api/incidents`
-Returns all incidents — 5 seeded mock records across Marikina barangays, plus anything created during the current server session.
+Returns all incidents the caller's agency may see (dispatcher token required, agency-filtered server-side).
 
 ```bash
 curl http://localhost:5000/api/incidents
@@ -122,7 +165,19 @@ curl http://localhost:5000/api/incidents/INC-20250811-0001
 ```
 
 ### `PATCH /api/incidents/:id/status`
-Updates an incident's status (`Pending` → `Dispatched` → `Resolved`) and (mock) sends an SMS status update.
+Updates an incident's status (`Pending` → `Dispatched` → `En Route` → `Resolved`). Only a genuine transition to `Resolved` queues a citizen SMS; every other transition still returns 200 with no text.
+
+### `POST /api/incidents/dispatch`
+Assigns a station + unit (dispatcher token, agency-scoped). Persists the `dispatch`/`station` blocks and computes a driving ETA. Sends no SMS.
+
+### `POST /api/auth/login`
+Staff login via Firebase Auth REST. Returns a Firebase ID token plus `{ uid, email, agency, role }`.
+
+### Staff User Management (`/api/users`, admin role required)
+`GET /` list, `POST /` create, `PATCH /:uid` update, `PATCH /:uid/status` enable/disable, plus `POST /me/password` for self-service password change.
+
+### `GET /api/routes`, `GET /api/weather-river`, evidence endpoints
+Driving directions (Mapbox, straight-line fallback), PAGASA river data (`source: "pagasa" | "mock"`), and evidence upload (`POST /api/incidents/:id/evidence`, multipart `file`) with Firebase Storage URLs — all public and rate-limited. See `AGENTS.md` for the full contract table.
 
 ```bash
 curl -X PATCH http://localhost:5000/api/incidents/INC-20250811-0001/status \
@@ -130,27 +185,25 @@ curl -X PATCH http://localhost:5000/api/incidents/INC-20250811-0001/status \
   -d '{ "status": "Dispatched" }'
 ```
 
-> ⚠️ Data resets every time the server restarts — it's an in-memory array (`data/mockIncidents.js`), not a real database yet.
+> ⚠️ The in-memory mock store is a fallback/test path only — live data lives in Firebase RTDB and survives restarts.
 
 ---
 
 ## 5. Team Assignments
 
-| Role | Developer Focus | Primary Files |
+| Area | Focus | Primary Files |
 |---|---|---|
-| **Lead Programmer** | Owns the middleware gateway, API contract, and integration between all 5 developers' work. Reviews PRs, keeps `server.js` and shared schema consistent. | `server.js`, `/routes`, `/controllers`, this README |
-| **Mobile UI Developer** | Builds the React Native citizen-facing screens (incident report form, status tracker) against the endpoints above. | Consumes `POST /api/incidents`, `GET /api/incidents/:id` |
-| **Mobile GPS/Mapbox Developer** | Wires up real GPS capture in the app and replaces the mocked `mapboxService.js` with live Mapbox Geocoding calls. | `services/mapboxService.js` |
-| **Admin Web Dashboard Developer** | Builds the React web dashboard for dispatchers to view/manage incidents and update statuses. | Consumes `GET /api/incidents`, `PATCH /api/incidents/:id/status` |
-| **Database/Notification Engine Developer** | Replaces the in-memory mock store with real Firebase Realtime Database calls, wires up Firebase Cloud Messaging, and maintains the TextBee SMS integration. | `config/firebase.js`, `services/textbeeService.js`, `data/mockIncidents.js` |
+| **Middleware gateway** | Owns the API contract and integration between all clients' work. Reviews PRs, keeps `server.js` and shared schema consistent. | `server.js`, `/routes`, `/controllers`, this README |
+| **Mobile client** | Citizen-facing report form and status tracker against the public endpoints. | Consumes `POST /api/incidents`, `GET /api/incidents/:id` |
+| **Web dashboard** | Dispatcher incident queue, dispatch, status updates, User Management. | Consumes `GET /api/incidents`, `POST /api/incidents/dispatch`, `PATCH /api/incidents/:id/status`, `/api/users` |
+| **Data/notifications** | Firebase RTDB/Auth, Storage uploads, TextBee SMS integration. | `config/firebase.js`, `services/*`, `data/mockIncidents.js` |
 
-### Suggested Phase 2 handoff notes
-- Every mock section in the code is clearly commented with `MOCK MODE` and includes the real implementation, commented out, right above it — just uncomment and fill in credentials.
-- Once Firebase is wired up, swap the calls in `controllers/incidentController.js` from `mockIncidents.*` to `db.ref('incidents').*`.
+- New endpoints follow the `{ success, message, data }` shape (see `incidentController.js`).
+- Controllers never touch the store, stations config, or Firebase SDK directly — see `AGENTS.md` Hard Rules.
 - Update `config/corsOptions.js` if your dev server runs on a different port than the defaults listed there.
 
 ---
 
 ## 6. Environment Variables
 
-See `.env.example` for the full list: `PORT`, `MAPBOX_ACCESS_TOKEN`, `TEXTBEE_API_KEY`, `FIREBASE_CREDENTIALS`, `FIREBASE_DATABASE_URL`. Never commit your actual `.env` file — it's already in `.gitignore`. (`TEXTBEE_API_KEY` is a lead-only secret — never paste a real value into docs, code, or commits.)
+See `.env.example` for the full list: `PORT`, `MAPBOX_ACCESS_TOKEN`, `TEXTBEE_API_KEY`, `TEXTBEE_DEVICE_ID`, `FIREBASE_CREDENTIALS` / `FIREBASE_CREDENTIALS_JSON`, `FIREBASE_DATABASE_URL`, `FIREBASE_WEB_API_KEY`, station duty phones, and the legacy `JWT_SECRET` (no longer used — kept for backward compatibility). Never commit your actual `.env` file — it's already in `.gitignore`. (`TEXTBEE_API_KEY` and Firebase credentials are lead-only secrets — never paste real values into docs, code, or commits.)
