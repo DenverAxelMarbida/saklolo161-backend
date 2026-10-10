@@ -18,7 +18,13 @@
  */
 
 const mockIncidents = require('../data/mockIncidents');
-const { getDb } = require('../config/firebase');
+
+// Live lookup (same shape as services/userService.js) — never
+// destructure getDb at load time, so tests can substitute the
+// Firebase handle through the shared require-cache instance.
+function getDb() {
+  return require('../config/firebase').getDb();
+}
 
 /**
  * Normalizes an incident to the contract shape. For the mock branch

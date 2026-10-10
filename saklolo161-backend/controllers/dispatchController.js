@@ -79,7 +79,16 @@ async function dispatchIncident(req, res, next) {
       });
     }
 
-    // ---- 3b. Agency authorization check (verifyAuth set req.user) ----
+    // ---- 3b. Inactive stations cannot accept dispatches (soft-deleted
+    // records stay in the store for history but leave every dropdown).
+    if (!stationService.isStationActive(station)) {
+      return res.status(400).json({
+        success: false,
+        message: `${station.name} is currently inactive and cannot accept dispatches.`,
+      });
+    }
+
+    // ---- 3c. Agency authorization check (verifyAuth set req.user) ----
     if (
       req.user.agency !== 'ALL' &&
       req.user.agency.toLowerCase() !== incident.category.toLowerCase()
@@ -90,12 +99,22 @@ async function dispatchIncident(req, res, next) {
       });
     }
 
-    // ---- 4. Confirm the unit belongs to that station ----
-    if (!station.assignedUnits.includes(assignedUnit)) {
+    // ---- 4. Confirm the unit belongs to that station (matched by
+    // unit id OR display name for backward compatibility with the
+    // legacy string-unit records) and is currently active. ----
+    const matchedUnit = stationService.findUnitInStation(station, assignedUnit);
+    if (!matchedUnit) {
       return res.status(400).json({
         success: false,
         message: `"${assignedUnit}" is not a registered unit of ${station.name}.`,
-        availableUnits: station.assignedUnits,
+        availableUnits: stationService.getActiveUnitNames(station),
+      });
+    }
+    if (matchedUnit.isActive === false) {
+      return res.status(400).json({
+        success: false,
+        message: `"${matchedUnit.name}" is currently inactive and cannot accept dispatches.`,
+        availableUnits: stationService.getActiveUnitNames(station),
       });
     }
 
