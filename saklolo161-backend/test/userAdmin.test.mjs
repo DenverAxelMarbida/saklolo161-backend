@@ -2,7 +2,8 @@
  * test/userAdmin.test.mjs
  * --------------------------------------------------------------
  * HTTP tests for the admin user-management surface
- * (GET/POST/PATCH /api/users, PATCH /api/users/:uid/status).
+ * (GET/POST/PATCH /api/users, PATCH /api/users/:uid/status,
+ * PATCH /api/users/:uid/password).
  *
  * Unlike contract.test.mjs (real Firebase), these tests MOCK every
  * Firebase Admin Auth operation — user-management unit/HTTP coverage
@@ -90,8 +91,11 @@ afterAll(() => {
   firebaseNative.getFirebaseAuth = originalGetFirebaseAuth;
 });
 
-// Valid against the shared password policy (16+, upper/lower/digit/special).
+// Valid against the shared password policy (8+, upper/lower/digit/special).
 const STRONG_PASSWORD = 'Str0ngPass!xK9pQ2';
+// The ADMIN's own password, supplied for reauthentication on
+// sensitive actions (disable, admin password reset).
+const ADMIN_PASSWORD = 'AdminPass!xK9pQ2';
 
 // Two provisioned Firebase users as listUsers() would return them:
 // claims attached, no passwords (Firebase never returns those).
@@ -407,29 +411,63 @@ describe('PATCH /api/users/:uid — updates', () => {
 });
 
 describe('PATCH /api/users/:uid/status — disable/enable', () => {
-  it('14. disabling sets disabled: true and revokes refresh tokens', async () => {
+  it('14. disabling requires the admin password, sets disabled: true and revokes refresh tokens', async () => {
     const res = await request(app)
       .patch('/api/users/uid-fire/status')
       .set(adminAuth)
-      .send({ enabled: false });
+      .send({ enabled: false, adminPassword: ADMIN_PASSWORD });
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
+    // Reauthentication: the ADMIN's own email from the token + the
+    // supplied admin password.
+    expect(authServiceNative.verifyPassword).toHaveBeenCalledWith(
+      'admin@marikina.gov.ph',
+      ADMIN_PASSWORD,
+    );
     expect(mockAuth.updateUser).toHaveBeenCalledWith('uid-fire', {
       disabled: true,
     });
     expect(mockAuth.revokeRefreshTokens).toHaveBeenCalledWith('uid-fire');
   });
 
-  it('15. enabling sets disabled: false without revoking tokens', async () => {
+  it('15. enabling sets disabled: false without revoking tokens and without reauthentication', async () => {
     const res = await request(app)
       .patch('/api/users/uid-fire/status')
       .set(adminAuth)
       .send({ enabled: true });
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
+    expect(authServiceNative.verifyPassword).not.toHaveBeenCalled();
     expect(mockAuth.updateUser).toHaveBeenCalledWith('uid-fire', {
       disabled: false,
     });
+    expect(mockAuth.revokeRefreshTokens).not.toHaveBeenCalled();
+  });
+
+  it('rejects disabling without an adminPassword with 400 before touching Firebase', async () => {
+    const res = await request(app)
+      .patch('/api/users/uid-fire/status')
+      .set(adminAuth)
+      .send({ enabled: false });
+    expect(res.status).toBe(400);
+    expect(res.body.success).toBe(false);
+    expect(res.body.message).toMatch(/administrator password/i);
+    expect(authServiceNative.verifyPassword).not.toHaveBeenCalled();
+    expect(mockAuth.updateUser).not.toHaveBeenCalled();
+    expect(mockAuth.revokeRefreshTokens).not.toHaveBeenCalled();
+  });
+
+  it('rejects disabling with an incorrect admin password without touching Firebase', async () => {
+    authServiceNative.verifyPassword.mockResolvedValueOnce(false);
+
+    const res = await request(app)
+      .patch('/api/users/uid-fire/status')
+      .set(adminAuth)
+      .send({ enabled: false, adminPassword: 'WrongPass!123' });
+    expect(res.status).toBe(400);
+    expect(res.body.success).toBe(false);
+    expect(res.body.message).toMatch(/administrator password/i);
+    expect(mockAuth.updateUser).not.toHaveBeenCalled();
     expect(mockAuth.revokeRefreshTokens).not.toHaveBeenCalled();
   });
 
@@ -477,10 +515,10 @@ describe('POST /api/users — password policy', () => {
     const res = await request(app)
       .post('/api/users')
       .set(adminAuth)
-      .send({ ...baseBody, password: 'secret123' });
+      .send({ ...baseBody, password: 'Sh0rt!A' });
     expect(res.status).toBe(400);
     expect(res.body.success).toBe(false);
-    expect(res.body.message).toMatch(/16 characters/);
+    expect(res.body.message).toMatch(/8 characters/);
     expect(mockAuth.createUser).not.toHaveBeenCalled();
     expect(mockAuth.setCustomUserClaims).not.toHaveBeenCalled();
   });
@@ -540,7 +578,7 @@ describe('POST /api/users — password policy', () => {
 });
 
 describe('PATCH /api/users/:uid — password fields are not accepted', () => {
-  it('never forwards a password to Firebase (no arbitrary admin password reset)', async () => {
+  it('never forwards a password to Firebase (password changes live only on the dedicated endpoints)', async () => {
     const res = await request(app)
       .patch('/api/users/uid-fire')
       .set(adminAuth)
@@ -599,10 +637,10 @@ describe('POST /api/users/me/password — self-service change', () => {
     const res = await request(app)
       .post('/api/users/me/password')
       .set(adminAuth)
-      .send({ ...CHANGE_BODY, newPassword: 'short1!', confirmNewPassword: 'short1!' });
+      .send({ ...CHANGE_BODY, newPassword: 'Sh0rt!A', confirmNewPassword: 'Sh0rt!A' });
     expect(res.status).toBe(400);
     expect(res.body.success).toBe(false);
-    expect(res.body.message).toMatch(/16 characters/);
+    expect(res.body.message).toMatch(/8 characters/);
     expect(authServiceNative.verifyPassword).not.toHaveBeenCalled();
     expect(mockAuth.updateUser).not.toHaveBeenCalled();
   });
@@ -712,5 +750,130 @@ describe('POST /api/users/me/password — self-service change', () => {
       'admin@marikina.gov.ph',
       CHANGE_BODY.currentPassword,
     );
+  });
+});
+
+describe('PATCH /api/users/:uid/password — admin reset', () => {
+  const RESET_BODY = {
+    newPassword: 'N3wSecure!Passw0rd!',
+    confirmNewPassword: 'N3wSecure!Passw0rd!',
+  };
+
+  it('returns 401 when no token is provided', async () => {
+    const res = await request(app)
+      .patch('/api/users/uid-fire/password')
+      .send(RESET_BODY);
+    expect(res.status).toBe(401);
+    expect(res.body.success).toBe(false);
+    // Route-registration guard: if this route ever disappears from
+    // routes/userRoutes.js, errorHandler answers 404 "Route not found"
+    // instead of reaching verifyAuth — exactly the production outage
+    // this suite must catch before deploy.
+    expect(res.body.message).not.toMatch(/Route not found/i);
+    expect(mockAuth.updateUser).not.toHaveBeenCalled();
+  });
+
+  it('returns 403 for a dispatcher', async () => {
+    const res = await request(app)
+      .patch('/api/users/uid-fire/password')
+      .set(dispatcherAuth)
+      .send(RESET_BODY);
+    expect(res.status).toBe(403);
+    expect(mockAuth.updateUser).not.toHaveBeenCalled();
+  });
+
+  it('requires no admin password: succeeds with only the new password fields', async () => {
+    const res = await request(app)
+      .patch('/api/users/uid-fire/password')
+      .set(adminAuth)
+      .send(RESET_BODY);
+
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    // Authorization is the verified admin token + role gate only —
+    // no password reauthentication on this route.
+    expect(authServiceNative.verifyPassword).not.toHaveBeenCalled();
+    expect(mockAuth.updateUser).toHaveBeenCalledWith('uid-fire', {
+      password: 'N3wSecure!Passw0rd!',
+    });
+  });
+
+  it('rejects a weak new password with 400 before touching Firebase', async () => {
+    const res = await request(app)
+      .patch('/api/users/uid-fire/password')
+      .set(adminAuth)
+      .send({ ...RESET_BODY, newPassword: 'Sh0rt!A', confirmNewPassword: 'Sh0rt!A' });
+    expect(res.status).toBe(400);
+    expect(res.body.success).toBe(false);
+    expect(res.body.message).toMatch(/8 characters/);
+    expect(authServiceNative.verifyPassword).not.toHaveBeenCalled();
+    expect(mockAuth.updateUser).not.toHaveBeenCalled();
+  });
+
+  it('rejects a confirmation mismatch with 400', async () => {
+    const res = await request(app)
+      .patch('/api/users/uid-fire/password')
+      .set(adminAuth)
+      .send({ ...RESET_BODY, confirmNewPassword: 'Different!Pass123' });
+    expect(res.status).toBe(400);
+    expect(res.body.success).toBe(false);
+    expect(authServiceNative.verifyPassword).not.toHaveBeenCalled();
+    expect(mockAuth.updateUser).not.toHaveBeenCalled();
+  });
+
+  it('sets the TARGET uid password from the route (admin token authorized)', async () => {
+    const res = await request(app)
+      .patch('/api/users/uid-fire/password')
+      .set(adminAuth)
+      .send(RESET_BODY);
+
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+
+    // No reauthentication: the admin's password is never checked here.
+    expect(authServiceNative.verifyPassword).not.toHaveBeenCalled();
+
+    // Password update: the TARGET uid from the route.
+    expect(mockAuth.updateUser).toHaveBeenCalledTimes(1);
+    expect(mockAuth.updateUser).toHaveBeenCalledWith('uid-fire', {
+      password: 'N3wSecure!Passw0rd!',
+    });
+  });
+
+  it('never returns any password in the response', async () => {
+    const res = await request(app)
+      .patch('/api/users/uid-fire/password')
+      .set(adminAuth)
+      .send(RESET_BODY);
+    expect(res.status).toBe(200);
+    const raw = JSON.stringify(res.body);
+    expect(raw).not.toContain(RESET_BODY.newPassword);
+    expect(raw).not.toMatch(/adminPassword|newPassword|confirmNewPassword/);
+  });
+
+  it('never logs any password on success or rejection', async () => {
+    const logSpy = vi.spyOn(console, 'log');
+    const errorSpy = vi.spyOn(console, 'error');
+    const warnSpy = vi.spyOn(console, 'warn');
+
+    await request(app)
+      .patch('/api/users/uid-fire/password')
+      .set(adminAuth)
+      .send(RESET_BODY);
+    await request(app)
+      .patch('/api/users/uid-fire/password')
+      .set(adminAuth)
+      .send({ ...RESET_BODY, confirmNewPassword: 'Different!Pass123' });
+
+    const logged = [...logSpy.mock.calls, ...errorSpy.mock.calls, ...warnSpy.mock.calls]
+      .flat()
+      .map((arg) => String(arg))
+      .join(' ');
+    logSpy.mockRestore();
+    errorSpy.mockRestore();
+    warnSpy.mockRestore();
+
+    expect(logged).not.toContain(ADMIN_PASSWORD);
+    expect(logged).not.toContain(RESET_BODY.newPassword);
   });
 });

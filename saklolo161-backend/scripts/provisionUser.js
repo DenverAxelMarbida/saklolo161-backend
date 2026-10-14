@@ -8,11 +8,13 @@
  * ({ uid, email, agency, role }).
  *
  * Usage:
- *     node scripts/provisionUser.js --email=new@marikina.gov.ph --password=temp123 --agency=FIRE --role=dispatcher
+ *     node scripts/provisionUser.js --email=new@marikina.gov.ph --password=Temp1234! --agency=FIRE --role=dispatcher
  *
  * Required args:
  *   --email    account email (used to log in)
- *   --password plaintext password (stored by Firebase Auth, never here)
+ *   --password plaintext password (stored by Firebase Auth, never here;
+ *              must satisfy services/passwordPolicy.js — 8+ chars with
+ *              upper/lower/digit/special)
  *   --agency   MEDICAL | FIRE | FLOOD | CRIME | ALL
  *   --role     dispatcher | admin
  *
@@ -26,8 +28,9 @@
  */
 
 const { initializeFirebase, getFirebaseAuth } = require('../config/firebase');
+const { passwordFailures } = require('../services/passwordPolicy');
 
-const USAGE = `node scripts/provisionUser.js --email=you@marikina.gov.ph --password=temp123 --agency=FIRE --role=dispatcher`;
+const USAGE = `node scripts/provisionUser.js --email=you@marikina.gov.ph --password=Temp1234! --agency=FIRE --role=dispatcher`;
 
 const VALID_AGENCIES = ['MEDICAL', 'FIRE', 'FLOOD', 'CRIME', 'ALL'];
 const VALID_ROLES = ['dispatcher', 'admin'];
@@ -64,6 +67,10 @@ async function main() {
 
   if (!email || !password || !agency || !role) {
     fail('All of --email, --password, --agency, --role are required.');
+  }
+  const policyFailures = passwordFailures(password);
+  if (policyFailures.length > 0) {
+    fail(`password ${policyFailures.join('; ')}.`);
   }
   if (!VALID_AGENCIES.includes(agency)) {
     fail(`agency must be one of: ${VALID_AGENCIES.join(', ')}.`);

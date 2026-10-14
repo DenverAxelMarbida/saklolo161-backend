@@ -66,7 +66,8 @@ haven't necessarily been in every session.
 | `GET /api/users` | Admin role required | Staff account list (web User Management). |
 | `POST /api/users` | Admin role required | Create staff account `{ email, password, agency, role }`. |
 | `PATCH /api/users/:uid` | Admin role required | Update email / agency / role. |
-| `PATCH /api/users/:uid/status` | Admin role required | Enable / disable an account `{ enabled }`. |
+| `PATCH /api/users/:uid/status` | Admin role required | Enable / disable an account `{ enabled }`. Disabling additionally requires `adminPassword` (the acting admin's own current password, re-verified server-side). |
+| `PATCH /api/users/:uid/password` | Admin role required | Admin changes another account's password `{ newPassword, confirmNewPassword }`; authorized by the verified admin token + role gate only (no admin-password reauth for this action). |
 | `POST /api/users/me/password` | Dispatcher token required | Authenticated user changes their own password. |
 | `GET /api/weather-river` | None | 10-min server-side cache. Gains UI-ignored `source: "pagasa" | "mock"` in Phase 3. |
 | `GET /api/routes` | None — public, rate-limited | Phase 3 (live). Real driving route via Mapbox Directions; straight-line fallback on failure. |

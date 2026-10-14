@@ -6,7 +6,7 @@
  * admin create-user flow AND the self-service change-password flow
  * both validate against.
  *
- * Policy: >= 16 chars, >= 1 lowercase, >= 1 uppercase, >= 1 digit,
+ * Policy: >= 8 chars, >= 1 lowercase, >= 1 uppercase, >= 1 digit,
  * >= 1 special character.
  * --------------------------------------------------------------
  */
@@ -17,15 +17,15 @@ import passwordPolicy from '../services/passwordPolicy.js';
 const { isStrongPassword, passwordFailures, PASSWORD_REQUIREMENTS } = passwordPolicy;
 
 describe('password policy', () => {
-  it('rejects a password shorter than 16 characters', () => {
-    expect(isStrongPassword('Sh0rt!Pass')).toBe(false);
-    expect(passwordFailures('Sh0rt!Pass')).toContain('must be at least 16 characters');
+  it('rejects a password shorter than 8 characters', () => {
+    expect(isStrongPassword('Sh0rt!A')).toBe(false);
+    expect(passwordFailures('Sh0rt!A')).toContain('must be at least 8 characters');
   });
 
-  it('accepts exactly 16 characters satisfying every requirement', () => {
-    // 16 chars: upper A, lower b, digit 1, special !
-    expect(isStrongPassword('Ab1!Ab1!Ab1!Ab1!')).toBe(true);
-    expect(passwordFailures('Ab1!Ab1!Ab1!Ab1!')).toEqual([]);
+  it('accepts exactly 8 characters satisfying every requirement', () => {
+    // 8 chars: upper A, lower b, digit 1, special !
+    expect(isStrongPassword('Ab1!ab12')).toBe(true);
+    expect(passwordFailures('Ab1!ab12')).toEqual([]);
   });
 
   it('rejects a password with no lowercase letter', () => {
