@@ -368,6 +368,68 @@ describe('POST /api/stations — admin management (reauth + initial units requir
     expect(fakeDb.__store().stations.MEDICAL_DUP_UNITS).toBeUndefined();
   });
 
+  it('9g. rejects creation without coordinates and persists NOTHING', async () => {
+    // Missing entirely, null (what the old frontend sent for blanks),
+    // half-filled, whitespace/malformed/non-finite, out-of-range.
+    const cases = [
+      ['missing', ({ coords, ...rest }) => rest],
+      ['null', (body) => ({ ...body, coords: null })],
+      ['missing lat', (body) => ({ ...body, coords: { lng: 121.1 } })],
+      ['missing lng', (body) => ({ ...body, coords: { lat: 14.65 } })],
+      ['null lat', (body) => ({ ...body, coords: { lat: null, lng: 121.1 } })],
+      ['string lat', (body) => ({ ...body, coords: { lat: '14.65', lng: 121.1 } })],
+      ['NaN lng', (body) => ({ ...body, coords: { lat: 14.65, lng: NaN } })],
+      ['lat out of range', (body) => ({ ...body, coords: { lat: 91, lng: 0 } })],
+      ['lng out of range', (body) => ({ ...body, coords: { lat: 0, lng: -181 } })],
+    ];
+    for (const [i, [label, mutate]] of cases.entries()) {
+      const id = `MEDICAL_NO_COORDS_${i}`;
+      const res = await request(app)
+        .post('/api/stations')
+        .set(adminAuth)
+        .send({ ...mutate(validBody), id });
+      expect(res.status, label).toBe(400);
+      expect(res.body.success, label).toBe(false);
+      expect(fakeDb.__store().stations[id], label).toBeUndefined();
+    }
+  });
+
+  it('9h. rejects creation without estimated turnout and persists NOTHING', async () => {
+    const cases = [
+      ['missing', ({ estimatedTurnout, ...rest }) => rest],
+      ['null', (body) => ({ ...body, estimatedTurnout: null })],
+      ['empty', (body) => ({ ...body, estimatedTurnout: '' })],
+      ['whitespace', (body) => ({ ...body, estimatedTurnout: '   ' })],
+      ['non-string', (body) => ({ ...body, estimatedTurnout: 5 })],
+      ['too long', (body) => ({ ...body, estimatedTurnout: 'x'.repeat(65) })],
+    ];
+    for (const [label, mutate] of cases) {
+      const id = `MEDICAL_NO_TURNOUT_${label.replace(/[^a-z]/gi, '').toUpperCase()}`;
+      const res = await request(app)
+        .post('/api/stations')
+        .set(adminAuth)
+        .send({ ...mutate(validBody), id });
+      expect(res.status, label).toBe(400);
+      expect(res.body.success, label).toBe(false);
+      expect(fakeDb.__store().stations[id], label).toBeUndefined();
+    }
+  });
+
+  it('9i. accepts genuine zero coordinates and a valid turnout on create', async () => {
+    const res = await request(app)
+      .post('/api/stations')
+      .set(adminAuth)
+      .send({
+        ...validBody,
+        id: 'MEDICAL_ZERO_COORDS',
+        coords: { lat: 0, lng: 0 },
+        estimatedTurnout: '5 mins',
+      });
+    expect(res.status).toBe(201);
+    expect(res.body.data.coords).toEqual({ lat: 0, lng: 0 });
+    expect(fakeDb.__store().stations.MEDICAL_ZERO_COORDS.coords).toEqual({ lat: 0, lng: 0 });
+  });
+
   it('10. rejects duplicate station ids with 409', async () => {
     const res = await request(app)
       .post('/api/stations')
@@ -417,6 +479,17 @@ describe('PATCH /api/stations/:id — update + activate/deactivate', () => {
     // it must never be persisted as a station field.
     expect(fakeDb.__store().stations.FIRE_BFP_MAIN_STATION).not.toHaveProperty('adminPassword');
     expect(res.body.data).not.toHaveProperty('adminPassword');
+  });
+
+  it('12c. edits omitting coords/turnout still succeed (PATCH stays partial)', async () => {
+    // The coords/turnout requirement is create-only; an edit that
+    // touches neither must not be forced to supply them.
+    const res = await request(app)
+      .patch('/api/stations/FIRE_BFP_MAIN_STATION')
+      .set(adminAuth)
+      .send({ phone: '162', adminPassword: ADMIN_PASSWORD });
+    expect(res.status).toBe(200);
+    expect(res.body.data.phone).toBe('162');
   });
 
   it('12b. rejects an edit without an adminPassword with 400 and leaves the station unchanged', async () => {
@@ -709,6 +782,8 @@ describe('Firebase unavailable — reads degrade, writes never fake success', ()
           id: 'X_DOWN',
           name: 'Down Test',
           category: 'Fire',
+          coords: { lat: 14.65, lng: 121.1 },
+          estimatedTurnout: '5 mins',
           assignedUnits: [{ id: 'eng-down', name: 'Engine Down' }],
           adminPassword: ADMIN_PASSWORD,
         });

@@ -232,9 +232,25 @@ function validateStationPayload(payload, { isCreate }) {
     errors.push(...validatePhone(body.phone, { required: false }));
   }
 
-  errors.push(...validateCoords(body.coords, { required: false }));
+  // Coordinates are REQUIRED on create (a station without a location
+  // cannot be dispatched or routed) but stay optional on update, where
+  // PATCH semantics allow omitting unchanged fields. validateCoords
+  // rejects null/undefined/empty/malformed/non-finite values and
+  // enforces lat -90..90 / lng -180..180; genuine zeros pass (typeof
+  // + range checks, never falsy traps).
+  errors.push(...validateCoords(body.coords, { required: isCreate }));
 
-  if (body.estimatedTurnout !== undefined) {
+  // Estimated turnout is REQUIRED on create (non-empty string ≤64 —
+  // the domain stores it as free text, e.g. "3–5 mins"; there is no
+  // numeric unit/range in the contract, so none is invented here) and
+  // stays optional-but-validated on update.
+  if (isCreate) {
+    if (typeof body.estimatedTurnout !== 'string' || body.estimatedTurnout.trim() === '') {
+      errors.push('estimatedTurnout is required and must be a non-empty string.');
+    } else if (body.estimatedTurnout.length > 64) {
+      errors.push('estimatedTurnout must be at most 64 characters.');
+    }
+  } else if (body.estimatedTurnout !== undefined) {
     if (typeof body.estimatedTurnout !== 'string') {
       errors.push('estimatedTurnout must be a string.');
     } else if (body.estimatedTurnout.length > 64) {
