@@ -175,7 +175,13 @@ async function addUnit(req, res) {
 }
 
 /**
- * PATCH /api/stations/:id/units/:unitId (admin) — rename a unit.
+ * PATCH /api/stations/:id/units/:unitId (admin) — rename a unit
+ * and/or change its id ({ name?, id? }). The service validates the
+ * new id (format + station-scoped uniqueness, unchanged id passes),
+ * rewrites the entry in place preserving activation state, and writes
+ * the unit list in one atomic update. Dispatch is unaffected: it
+ * resolves units live by id OR name and keeps only a historical
+ * snapshot string on the incident.
  */
 async function updateUnit(req, res) {
   try {

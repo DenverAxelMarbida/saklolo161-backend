@@ -282,7 +282,19 @@ function validateUnitPayload(payload, { isCreate }) {
       errors.push('Unit id must not contain . # $ [ ] / characters.');
     }
   } else if (body.id !== undefined) {
-    errors.push('Unit id cannot be changed.');
+    // Unit ids CAN change on update (single atomic rewrite of the
+    // entry — name and activation state preserved, never a
+    // delete-and-recreate). A supplied id must satisfy the same rules
+    // as on create; the caller checks uniqueness against the OTHER
+    // units in the station (an unchanged id is never a duplicate of
+    // itself).
+    if (typeof body.id !== 'string' || body.id.trim() === '') {
+      errors.push('Unit id must be a non-empty string.');
+    } else if (body.id.length > 64) {
+      errors.push('Unit id must be at most 64 characters.');
+    } else if (/[.#$[\]/]/.test(body.id)) {
+      errors.push('Unit id must not contain . # $ [ ] / characters.');
+    }
   }
 
   if (isCreate || body.name !== undefined) {
@@ -516,14 +528,21 @@ async function addUnit(stationId, payload) {
 }
 
 /**
- * Renames a unit (unit id is immutable).
+ * Updates a unit: renames it and/or changes its id. The entry is
+ * rewritten in place — name defaults to the current name and the
+ * activation state is always preserved — so this is never a
+ * delete-and-recreate. Changing the id is safe for dispatch: dispatch
+ * resolves units live by id OR name per request and stores only a
+ * historical snapshot string, so no incident, tracking, or log record
+ * holds a foreign key to the old id. Uniqueness is station-scoped
+ * (same scope as addUnit); an unchanged id passes trivially.
  */
 async function updateUnit(stationId, unitId, changes) {
   const errors = validateUnitPayload(changes, { isCreate: false });
   if (errors.length > 0) {
     throw new StationError(400, `Validation failed: ${errors.join(' ')}`);
   }
-  if (changes.name === undefined) {
+  if (changes.name === undefined && changes.id === undefined) {
     throw new StationError(400, 'No updatable unit fields provided.');
   }
 
@@ -539,7 +558,20 @@ async function updateUnit(stationId, unitId, changes) {
     throw new StationError(404, `Unit "${unitId}" not found in station ${stationId}.`);
   }
 
-  const next = current.map((u, i) => (i === index ? { ...u, name: changes.name.trim() } : u));
+  const newId = changes.id === undefined ? unitId : changes.id;
+  if (newId !== unitId && current.some((u, i) => i !== index && u.id === newId)) {
+    throw new StationError(409, `Unit "${newId}" already exists in station ${stationId}.`);
+  }
+
+  const next = current.map((u, i) =>
+    i === index
+      ? {
+          id: newId,
+          name: changes.name === undefined ? u.name : changes.name.trim(),
+          isActive: u.isActive,
+        }
+      : u,
+  );
   try {
     await db.ref(`stations/${stationId}`).update({ assignedUnits: next });
   } catch (err) {

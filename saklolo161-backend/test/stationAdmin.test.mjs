@@ -556,6 +556,62 @@ describe('Unit management — add / rename / activate-deactivate', () => {
     expect(missing.status).toBe(404);
   });
 
+  it('19b. changes a unit id in place — preserves name/state, enforces station-scoped uniqueness + format', async () => {
+    // id-only change: name + isActive preserved, old id gone, no
+    // add and no delete (still exactly the seeded units).
+    const res = await request(app)
+      .patch('/api/stations/FLOOD_RIVER_COMMAND/units/boat-1')
+      .set(adminAuth)
+      .send({ id: 'boat-9' });
+    expect(res.status).toBe(200);
+    const units = res.body.data.assignedUnits;
+    expect(units).toHaveLength(2);
+    expect(units.some((u) => u.id === 'boat-1')).toBe(false);
+    const moved = units.find((u) => u.id === 'boat-9');
+    expect(moved.name).toBe('Rescue Boat Unit #1');
+    expect(moved.isActive).toBe(true);
+
+    // id + name together in one atomic rewrite.
+    const both = await request(app)
+      .patch('/api/stations/FLOOD_RIVER_COMMAND/units/boat-9')
+      .set(adminAuth)
+      .send({ id: 'boat-7', name: 'Rescue Boat Seven' });
+    expect(both.status).toBe(200);
+    expect(both.body.data.assignedUnits.find((u) => u.id === 'boat-7').name).toBe('Rescue Boat Seven');
+
+    // An unchanged id is NOT a duplicate of itself.
+    const same = await request(app)
+      .patch('/api/stations/FLOOD_RIVER_COMMAND/units/boat-7')
+      .set(adminAuth)
+      .send({ id: 'boat-7', name: 'Rescue Boat Seven Prime' });
+    expect(same.status).toBe(200);
+    expect(same.body.data.assignedUnits.find((u) => u.id === 'boat-7').name).toBe('Rescue Boat Seven Prime');
+
+    // Duplicate of ANOTHER unit → 409, nothing changed.
+    const dup = await request(app)
+      .patch('/api/stations/FLOOD_RIVER_COMMAND/units/boat-7')
+      .set(adminAuth)
+      .send({ id: 'boat-2' });
+    expect(dup.status).toBe(409);
+    expect(dup.body.message).toMatch(/already exists/);
+
+    // Invalid formats → 400, nothing changed.
+    for (const bad of [{ id: '' }, { id: 'bad/id' }, { id: 'x'.repeat(65) }]) {
+      const badRes = await request(app)
+        .patch('/api/stations/FLOOD_RIVER_COMMAND/units/boat-7')
+        .set(adminAuth)
+        .send(bad);
+      expect(badRes.status).toBe(400);
+    }
+
+    // Empty payload is still rejected.
+    const empty = await request(app)
+      .patch('/api/stations/FLOOD_RIVER_COMMAND/units/boat-7')
+      .set(adminAuth)
+      .send({});
+    expect(empty.status).toBe(400);
+  });
+
   it('20. deactivating a unit keeps it stored but flags it inactive', async () => {
     const res = await request(app)
       .patch('/api/stations/FLOOD_RIVER_COMMAND/units/boat-1/status')
