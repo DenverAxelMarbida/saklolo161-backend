@@ -45,7 +45,7 @@ function respondWithFirebaseError(res, err) {
     case 'auth/weak-password':
       return res.status(400).json({
         success: false,
-        message: 'Password must be at least 6 characters.',
+        message: 'Password must be at least 8 characters.',
       });
     case 'auth/user-not-found':
     case 'auth/uid-not-found':
@@ -192,14 +192,46 @@ async function updateUser(req, res) {
 }
 
 /**
+ * Verifies the acting admin's OWN password (reauthentication for a
+ * sensitive action). `adminPassword` is checked against
+ * req.user.email — the verified token's email, never a client-
+ * supplied identity. Wrong/missing credentials respond 400 (NOT 401:
+ * 401 means "session dead" and clients sign the admin out on it).
+ *
+ * @returns {boolean} true when reauthentication succeeded.
+ */
+async function verifyAdminReauth(req, res, adminPassword) {
+  if (!adminPassword || typeof adminPassword !== 'string') {
+    res.status(400).json({
+      success: false,
+      message: 'Administrator password is required.',
+    });
+    return false;
+  }
+
+  const valid = await authService.verifyPassword(req.user.email, adminPassword);
+  if (!valid) {
+    res.status(400).json({
+      success: false,
+      message: 'Administrator password is incorrect.',
+    });
+    return false;
+  }
+  return true;
+}
+
+/**
  * PATCH /api/users/:uid/status
- * Body: { enabled: true | false } → 200.
+ * Body: { enabled: true | false, adminPassword? } → 200.
  * Disabling (not deleting) is the supported way to revoke access.
+ * Disabling is sensitive: it requires the acting admin to re-prove
+ * their OWN password (adminPassword) server-side first. Enabling
+ * (restoring access) does not require reauthentication.
  */
 async function setUserEnabled(req, res) {
   try {
     const { uid } = req.params;
-    const { enabled } = req.body || {};
+    const { enabled, adminPassword } = req.body || {};
 
     if (typeof enabled !== 'boolean') {
       return res.status(400).json({
@@ -208,12 +240,71 @@ async function setUserEnabled(req, res) {
       });
     }
 
+    if (enabled === false) {
+      const reauthed = await verifyAdminReauth(req, res, adminPassword);
+      if (!reauthed) return;
+    }
+
     const user = await userService.setUserEnabled(uid, enabled);
 
     return res.status(200).json({
       success: true,
       message: enabled ? 'User enabled.' : 'User disabled.',
       data: user,
+    });
+  } catch (err) {
+    return respondWithFirebaseError(res, err);
+  }
+}
+
+/**
+ * PATCH /api/users/:uid/password — admin changes ANOTHER account's
+ * password (verifyAuth + requireAdmin on the route).
+ * Body: { newPassword, confirmNewPassword } → 200.
+ *
+ * Authorization is the verified token + admin role gate on the route;
+ * no admin-password reauthentication is required for this action.
+ * The new password is policy-validated here and applied via Firebase
+ * Admin (hashed server-side); neither password is ever logged or
+ * echoed back.
+ */
+async function adminSetUserPassword(req, res) {
+  try {
+    const { uid } = req.params;
+    const { newPassword, confirmNewPassword } = req.body || {};
+
+    if (!newPassword || typeof newPassword !== 'string') {
+      return res.status(400).json({
+        success: false,
+        message: 'New password is required.',
+      });
+    }
+    if (!confirmNewPassword || typeof confirmNewPassword !== 'string') {
+      return res.status(400).json({
+        success: false,
+        message: 'Please confirm the new password.',
+      });
+    }
+    if (newPassword !== confirmNewPassword) {
+      return res.status(400).json({
+        success: false,
+        message: 'Passwords do not match.',
+      });
+    }
+
+    const policyFailures = passwordFailures(newPassword);
+    if (policyFailures.length > 0) {
+      return res.status(400).json({
+        success: false,
+        message: `Password ${policyFailures.join('; ')}.`,
+      });
+    }
+
+    await userService.setPassword(uid, newPassword);
+
+    return res.status(200).json({
+      success: true,
+      message: 'Password updated successfully.',
     });
   } catch (err) {
     return respondWithFirebaseError(res, err);
@@ -299,4 +390,11 @@ async function changeOwnPassword(req, res) {
   }
 }
 
-module.exports = { listUsers, createUser, updateUser, setUserEnabled, changeOwnPassword };
+module.exports = {
+  listUsers,
+  createUser,
+  updateUser,
+  setUserEnabled,
+  adminSetUserPassword,
+  changeOwnPassword,
+};

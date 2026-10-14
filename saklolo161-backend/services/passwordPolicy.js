@@ -6,7 +6,7 @@
  *   - POST /api/users            (admin create-user)
  *   - POST /api/users/me/password (self-service change)
  *
- * Policy: >= 16 characters with at least one lowercase letter,
+ * Policy: >= 8 characters with at least one lowercase letter,
  * one uppercase letter, one number, and one special (non-
  * alphanumeric) character. Firebase only enforces 6 characters,
  * so this layer is what makes the rule consistent everywhere.
@@ -21,9 +21,9 @@
 const PASSWORD_REQUIREMENTS = [
   {
     id: 'length',
-    label: 'At least 16 characters',
-    message: 'must be at least 16 characters',
-    test: (password) => password.length >= 16,
+    label: 'At least 8 characters',
+    message: 'must be at least 8 characters',
+    test: (password) => password.length >= 8,
   },
   {
     id: 'lowercase',
