@@ -96,11 +96,21 @@ async function getStation(req, res) {
 }
 
 /**
- * POST /api/stations (admin) — create a station.
+ * POST /api/stations (admin) — create a station with its initial
+ * assigned units. Body: { ...stationFields, assignedUnits, adminPassword }.
+ * Creating a station is sensitive (it shapes future dispatch
+ * targeting), so the acting admin must re-prove their OWN password
+ * (adminPassword) server-side first — same mechanism as editing a
+ * station. adminPassword is stripped before the service ever sees
+ * the payload. The service enforces at least one assigned unit and
+ * creates the station + units in a single database write.
  */
 async function createStation(req, res) {
   try {
-    const station = await stationService.createStation(req.body || {});
+    const { adminPassword, ...payload } = req.body || {};
+    const reauthed = await verifyAdminReauth(req, res, adminPassword);
+    if (!reauthed) return;
+    const station = await stationService.createStation(payload);
     return res.status(201).json({ success: true, message: 'Station created successfully.', data: station });
   } catch (err) {
     return respondWithStationError(res, err);

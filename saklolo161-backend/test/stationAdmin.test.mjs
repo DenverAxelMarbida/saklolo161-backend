@@ -236,7 +236,7 @@ describe('GET /api/stations — auth boundary + active filtering', () => {
   });
 });
 
-describe('POST /api/stations — admin management', () => {
+describe('POST /api/stations — admin management (reauth + initial units required)', () => {
   const validBody = {
     id: 'MEDICAL_TEST_BASE',
     name: 'Test Medical Base',
@@ -245,6 +245,7 @@ describe('POST /api/stations — admin management', () => {
     coords: { lat: 14.65, lng: 121.1 },
     estimatedTurnout: '5 mins',
     assignedUnits: [{ id: 'amb-1', name: 'Ambulance 1' }],
+    adminPassword: ADMIN_PASSWORD,
   };
 
   it('8. returns 403 when a dispatcher attempts to create a station', async () => {
@@ -253,16 +254,118 @@ describe('POST /api/stations — admin management', () => {
     expect(res.body.success).toBe(false);
   });
 
-  it('9. creates the station (201) and persists it to the store', async () => {
+  it('9. creates the station (201) with its initial units after admin reauth, in one write', async () => {
     const res = await request(app).post('/api/stations').set(adminAuth).send(validBody);
     expect(res.status).toBe(201);
     expect(res.body.success).toBe(true);
     expect(res.body.data.id).toBe('MEDICAL_TEST_BASE');
     expect(res.body.data.isActive).toBe(true);
+    expect(res.body.data.assignedUnits).toEqual([
+      { id: 'amb-1', name: 'Ambulance 1', isActive: true },
+    ]);
 
+    // Reauthenticated against the ACTING admin's email from the token.
+    expect(authServiceNative.verifyPassword).toHaveBeenCalledWith(
+      'admin@marikina.gov.ph',
+      ADMIN_PASSWORD,
+    );
+
+    // The station AND its units landed together (single atomic set()).
     const stored = fakeDb.__store().stations.MEDICAL_TEST_BASE;
     expect(stored).toBeTruthy();
     expect(stored.name).toBe('Test Medical Base');
+    expect(stored.assignedUnits).toEqual([
+      { id: 'amb-1', name: 'Ambulance 1', isActive: true },
+    ]);
+    // adminPassword is stripped before the service ever sees it.
+    expect(stored).not.toHaveProperty('adminPassword');
+    expect(res.body.data).not.toHaveProperty('adminPassword');
+  });
+
+  it('9b. rejects creation without adminPassword and persists NOTHING', async () => {
+    const { adminPassword, ...withoutPassword } = validBody;
+    const res = await request(app)
+      .post('/api/stations')
+      .set(adminAuth)
+      .send(withoutPassword);
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/administrator password is required/i);
+    // No partial station-without-units state in the store.
+    expect(fakeDb.__store().stations.MEDICAL_TEST_BASE).toBeUndefined();
+  });
+
+  it('9c. rejects an incorrect adminPassword and persists NOTHING', async () => {
+    authServiceNative.verifyPassword.mockResolvedValueOnce(false);
+    const res = await request(app)
+      .post('/api/stations')
+      .set(adminAuth)
+      .send({ ...validBody, id: 'MEDICAL_WRONG_PW' });
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/administrator password is incorrect/i);
+    expect(authServiceNative.verifyPassword).toHaveBeenCalledWith(
+      'admin@marikina.gov.ph',
+      ADMIN_PASSWORD,
+    );
+    expect(fakeDb.__store().stations.MEDICAL_WRONG_PW).toBeUndefined();
+  });
+
+  it('9d. rejects creation with zero assigned units and persists NOTHING', async () => {
+    const res = await request(app)
+      .post('/api/stations')
+      .set(adminAuth)
+      .send({ ...validBody, id: 'MEDICAL_NO_UNITS', assignedUnits: [] });
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/at least one assigned unit/i);
+    expect(fakeDb.__store().stations.MEDICAL_NO_UNITS).toBeUndefined();
+  });
+
+  it('9e. rejects missing assignedUnits entirely (same rule as empty)', async () => {
+    const { assignedUnits, ...noUnitsField } = validBody;
+    const res = await request(app)
+      .post('/api/stations')
+      .set(adminAuth)
+      .send({ ...noUnitsField, id: 'MEDICAL_NO_UNITS_FIELD' });
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/at least one assigned unit/i);
+    expect(fakeDb.__store().stations.MEDICAL_NO_UNITS_FIELD).toBeUndefined();
+  });
+
+  it('9f. rejects invalid unit ids/names and duplicate unit ids with 400', async () => {
+    const bannedChar = await request(app)
+      .post('/api/stations')
+      .set(adminAuth)
+      .send({
+        ...validBody,
+        id: 'MEDICAL_BAD_UNIT',
+        assignedUnits: [{ id: 'bad/id', name: 'Broken' }],
+      });
+    expect(bannedChar.status).toBe(400);
+    expect(fakeDb.__store().stations.MEDICAL_BAD_UNIT).toBeUndefined();
+
+    const emptyName = await request(app)
+      .post('/api/stations')
+      .set(adminAuth)
+      .send({
+        ...validBody,
+        id: 'MEDICAL_EMPTY_UNIT_NAME',
+        assignedUnits: [{ id: 'u1', name: '   ' }],
+      });
+    expect(emptyName.status).toBe(400);
+    expect(fakeDb.__store().stations.MEDICAL_EMPTY_UNIT_NAME).toBeUndefined();
+
+    const duplicate = await request(app)
+      .post('/api/stations')
+      .set(adminAuth)
+      .send({
+        ...validBody,
+        id: 'MEDICAL_DUP_UNITS',
+        assignedUnits: [
+          { id: 'u1', name: 'Unit One' },
+          { id: 'u1', name: 'Unit One Again' },
+        ],
+      });
+    expect(duplicate.status).toBe(400);
+    expect(fakeDb.__store().stations.MEDICAL_DUP_UNITS).toBeUndefined();
   });
 
   it('10. rejects duplicate station ids with 409', async () => {
@@ -546,7 +649,13 @@ describe('Firebase unavailable — reads degrade, writes never fake success', ()
       const create = await request(app)
         .post('/api/stations')
         .set(adminAuth)
-        .send({ id: 'X_DOWN', name: 'Down Test', category: 'Fire' });
+        .send({
+          id: 'X_DOWN',
+          name: 'Down Test',
+          category: 'Fire',
+          assignedUnits: [{ id: 'eng-down', name: 'Engine Down' }],
+          adminPassword: ADMIN_PASSWORD,
+        });
       expect(create.status).toBe(503);
       expect(create.body.success).toBe(false);
 

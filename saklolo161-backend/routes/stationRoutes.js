@@ -37,7 +37,7 @@ const {
 // GET /api/stations - list stations (active only, unless admin ?includeInactive=true)
 router.get('/', verifyAuth, listStations);
 
-// POST /api/stations - create a station (admin only)
+// POST /api/stations - create a station with initial units (admin reauth)
 router.post('/', verifyAuth, requireAdmin, createStation);
 
 // PATCH /api/stations/:id/status - activate/deactivate a station (before /:id)
