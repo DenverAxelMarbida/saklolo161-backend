@@ -365,6 +365,34 @@ async function createStation(payload) {
     throw new StationError(400, `Validation failed: ${errors.join(' ')}`);
   }
 
+  // A station without units cannot dispatch — creation requires at
+  // least one initial unit, each fully validated with the same rules
+  // as POST /:id/units (length, banned characters, uniqueness).
+  const rawUnits = Array.isArray(payload.assignedUnits) ? payload.assignedUnits : [];
+  if (rawUnits.length === 0) {
+    throw new StationError(400, 'Validation failed: at least one assigned unit is required.');
+  }
+  const unitErrors = [];
+  const seenIds = new Set();
+  const assignedUnits = [];
+  for (const raw of rawUnits) {
+    const unit = normalizeUnit(raw);
+    if (!unit || typeof unit.id !== 'string' || unit.id.trim() === ''
+      || typeof unit.name !== 'string' || unit.name.trim() === '') {
+      unitErrors.push('Every assigned unit needs a non-empty id/name.');
+      continue;
+    }
+    unitErrors.push(...validateUnitPayload({ id: unit.id, name: unit.name }, { isCreate: true }));
+    if (seenIds.has(unit.id)) {
+      unitErrors.push(`Duplicate unit id "${unit.id}" in assignedUnits.`);
+    }
+    seenIds.add(unit.id);
+    assignedUnits.push({ id: unit.id, name: unit.name.trim(), isActive: unit.isActive });
+  }
+  if (unitErrors.length > 0) {
+    throw new StationError(400, `Validation failed: ${unitErrors.join(' ')}`);
+  }
+
   const db = requireDb();
   const existing = await db.ref(`stations/${payload.id}`).once('value');
   if (existing.exists()) {
@@ -379,9 +407,12 @@ async function createStation(payload) {
     coords: payload.coords ?? null,
     estimatedTurnout: payload.estimatedTurnout ?? '',
     isActive: payload.isActive !== false,
-    assignedUnits: payload.assignedUnits ?? [],
+    assignedUnits,
   });
 
+  // Single set() at the station ref: Firebase RTDB writes to one ref
+  // are atomic — the station and ALL of its initial units land
+  // together or not at all (no partial station-without-units state).
   try {
     await db.ref(`stations/${payload.id}`).set(record);
   } catch (err) {
