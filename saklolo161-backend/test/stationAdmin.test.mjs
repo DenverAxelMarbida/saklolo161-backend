@@ -31,10 +31,14 @@ const authServiceNative = nativeRequire('../services/authService.js');
 const firebaseNative = nativeRequire('../config/firebase.js');
 
 const originalVerifyToken = authServiceNative.verifyToken;
+const originalVerifyPassword = authServiceNative.verifyPassword;
 const originalGetDb = firebaseNative.getDb;
 
 const ADMIN_TOKEN = 'station-admin-token';
 const DISPATCHER_TOKEN = 'station-dispatcher-token';
+// The ADMIN's own password, supplied for reauthentication on
+// sensitive actions (station edit, station deactivation).
+const ADMIN_PASSWORD = 'AdminPass!xK9pQ2';
 
 const adminAuth = { Authorization: `Bearer ${ADMIN_TOKEN}` };
 const dispatcherAuth = { Authorization: `Bearer ${DISPATCHER_TOKEN}` };
@@ -152,16 +156,24 @@ beforeAll(() => {
     throw new Error('Invalid or expired token.');
   });
 
+  // Current-password re-verification for admin reauthentication —
+  // default "correct"; individual tests override with
+  // mockResolvedValueOnce(false).
+  authServiceNative.verifyPassword = vi.fn(async () => true);
+
   firebaseNative.getDb = () => fakeDb;
 });
 
 afterAll(() => {
   authServiceNative.verifyToken = originalVerifyToken;
+  authServiceNative.verifyPassword = originalVerifyPassword;
   firebaseNative.getDb = originalGetDb;
 });
 
 beforeEach(() => {
   fakeDb = makeFakeDb(seedStations());
+  authServiceNative.verifyPassword.mockReset();
+  authServiceNative.verifyPassword.mockResolvedValue(true);
 });
 
 describe('GET /api/stations — auth boundary + active filtering', () => {
@@ -288,15 +300,48 @@ describe('PATCH /api/stations/:id — update + activate/deactivate', () => {
     const res = await request(app)
       .patch('/api/stations/FIRE_BFP_MAIN_STATION')
       .set(adminAuth)
-      .send({ name: 'Renamed Fire Station', phone: '161' });
+      .send({ name: 'Renamed Fire Station', phone: '161', adminPassword: ADMIN_PASSWORD });
     expect(res.status).toBe(200);
     expect(res.body.data.name).toBe('Renamed Fire Station');
     expect(res.body.data.assignedUnits).toHaveLength(2);
     expect(fakeDb.__store().stations.FIRE_BFP_MAIN_STATION.name).toBe('Renamed Fire Station');
+    // Reauthenticated against the ACTING admin's email from the token.
+    expect(authServiceNative.verifyPassword).toHaveBeenCalledWith(
+      'admin@marikina.gov.ph',
+      ADMIN_PASSWORD,
+    );
+    // adminPassword is stripped before the service ever sees it —
+    // it must never be persisted as a station field.
+    expect(fakeDb.__store().stations.FIRE_BFP_MAIN_STATION).not.toHaveProperty('adminPassword');
+    expect(res.body.data).not.toHaveProperty('adminPassword');
+  });
+
+  it('12b. rejects an edit without an adminPassword with 400 and leaves the station unchanged', async () => {
+    const res = await request(app)
+      .patch('/api/stations/FIRE_BFP_MAIN_STATION')
+      .set(adminAuth)
+      .send({ name: 'Should Not Persist' });
+    expect(res.status).toBe(400);
+    expect(res.body.message).toBe('Administrator password is required.');
+    expect(fakeDb.__store().stations.FIRE_BFP_MAIN_STATION.name).toContain('Bureau of Fire Protection');
+  });
+
+  it('12c. rejects an edit with an incorrect admin password with 400 and leaves the station unchanged', async () => {
+    authServiceNative.verifyPassword.mockResolvedValueOnce(false);
+    const res = await request(app)
+      .patch('/api/stations/FIRE_BFP_MAIN_STATION')
+      .set(adminAuth)
+      .send({ name: 'Should Not Persist', adminPassword: 'WrongPass!123' });
+    expect(res.status).toBe(400);
+    expect(res.body.message).toBe('Administrator password is incorrect.');
+    expect(fakeDb.__store().stations.FIRE_BFP_MAIN_STATION.name).toContain('Bureau of Fire Protection');
   });
 
   it('13. returns 404 for an unknown station', async () => {
-    const res = await request(app).patch('/api/stations/NOPE_NOT_HERE').set(adminAuth).send({ name: 'x' });
+    const res = await request(app)
+      .patch('/api/stations/NOPE_NOT_HERE')
+      .set(adminAuth)
+      .send({ name: 'x', adminPassword: ADMIN_PASSWORD });
     expect(res.status).toBe(404);
   });
 
@@ -313,7 +358,7 @@ describe('PATCH /api/stations/:id — update + activate/deactivate', () => {
     const off = await request(app)
       .patch('/api/stations/FIRE_BFP_MAIN_STATION/status')
       .set(adminAuth)
-      .send({ isActive: false });
+      .send({ isActive: false, adminPassword: ADMIN_PASSWORD });
     expect(off.status).toBe(200);
     expect(off.body.data.isActive).toBe(false);
 
@@ -327,6 +372,29 @@ describe('PATCH /api/stations/:id — update + activate/deactivate', () => {
     expect(on.status).toBe(200);
     const visible = await request(app).get('/api/stations').set(dispatcherAuth);
     expect(visible.body.data.map((s) => s.id)).toEqual(['FIRE_BFP_MAIN_STATION']);
+    // Deactivation reauthenticated; reactivation did not.
+    expect(authServiceNative.verifyPassword).toHaveBeenCalledTimes(1);
+  });
+
+  it('15b. rejects deactivation without an adminPassword with 400 and keeps the station active', async () => {
+    const res = await request(app)
+      .patch('/api/stations/FIRE_BFP_MAIN_STATION/status')
+      .set(adminAuth)
+      .send({ isActive: false });
+    expect(res.status).toBe(400);
+    expect(res.body.message).toBe('Administrator password is required.');
+    expect(fakeDb.__store().stations.FIRE_BFP_MAIN_STATION.isActive).not.toBe(false);
+  });
+
+  it('15c. rejects deactivation with an incorrect admin password with 400 and keeps the station active', async () => {
+    authServiceNative.verifyPassword.mockResolvedValueOnce(false);
+    const res = await request(app)
+      .patch('/api/stations/FIRE_BFP_MAIN_STATION/status')
+      .set(adminAuth)
+      .send({ isActive: false, adminPassword: 'WrongPass!123' });
+    expect(res.status).toBe(400);
+    expect(res.body.message).toBe('Administrator password is incorrect.');
+    expect(fakeDb.__store().stations.FIRE_BFP_MAIN_STATION.isActive).not.toBe(false);
   });
 
   it('16. rejects a non-boolean isActive with 400', async () => {
@@ -335,6 +403,8 @@ describe('PATCH /api/stations/:id — update + activate/deactivate', () => {
       .set(adminAuth)
       .send({ isActive: 'yes' });
     expect(res.status).toBe(400);
+    // Not a deactivation (isActive !== false) → no reauthentication attempted.
+    expect(authServiceNative.verifyPassword).not.toHaveBeenCalled();
   });
 });
 
@@ -483,7 +553,7 @@ describe('Firebase unavailable — reads degrade, writes never fake success', ()
       const deactivate = await request(app)
         .patch('/api/stations/FIRE_BFP_MAIN_STATION/status')
         .set(adminAuth)
-        .send({ isActive: false });
+        .send({ isActive: false, adminPassword: ADMIN_PASSWORD });
       expect(deactivate.status).toBe(503);
       expect(deactivate.body.success).toBe(false);
     } finally {

@@ -26,6 +26,7 @@
  */
 
 const stationService = require('../services/stationService');
+const verifyAdminReauth = require('../middlewares/verifyAdminReauth');
 const { StationError, VALID_CATEGORIES } = stationService;
 
 function respondWithStationError(res, err) {
@@ -108,10 +109,18 @@ async function createStation(req, res) {
 
 /**
  * PATCH /api/stations/:id (admin) — update station details.
+ * Body: { ...stationFields, adminPassword }. Editing an existing
+ * station is sensitive: the acting admin must re-prove their OWN
+ * password (adminPassword) server-side first — same mechanism as
+ * disabling an account. adminPassword is stripped before the
+ * service ever sees the payload.
  */
 async function updateStation(req, res) {
   try {
-    const station = await stationService.updateStation(req.params.id, req.body || {});
+    const { adminPassword, ...changes } = req.body || {};
+    const reauthed = await verifyAdminReauth(req, res, adminPassword);
+    if (!reauthed) return;
+    const station = await stationService.updateStation(req.params.id, changes);
     return res.status(200).json({ success: true, message: 'Station updated successfully.', data: station });
   } catch (err) {
     return respondWithStationError(res, err);
@@ -119,13 +128,19 @@ async function updateStation(req, res) {
 }
 
 /**
- * PATCH /api/stations/:id/status (admin) — { isActive }.
+ * PATCH /api/stations/:id/status (admin) — { isActive, adminPassword? }.
  * Deactivation is a soft-delete: incident dispatch snapshots keep
- * the historical station name.
+ * the historical station name. Deactivation (isActive: false) is
+ * sensitive and requires the acting admin's OWN password
+ * (adminPassword) re-verified server-side; reactivation does not.
  */
 async function setStationStatus(req, res) {
   try {
-    const { isActive } = req.body || {};
+    const { isActive, adminPassword } = req.body || {};
+    if (isActive === false) {
+      const reauthed = await verifyAdminReauth(req, res, adminPassword);
+      if (!reauthed) return;
+    }
     const station = await stationService.setStationActive(req.params.id, isActive);
     return res.status(200).json({
       success: true,

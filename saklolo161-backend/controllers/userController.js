@@ -19,6 +19,7 @@
 
 const userService = require('../services/userService');
 const authService = require('../services/authService');
+const verifyAdminReauth = require('../middlewares/verifyAdminReauth');
 const { passwordFailures } = require('../services/passwordPolicy');
 
 const { VALID_AGENCIES, VALID_ROLES } = userService;
@@ -192,35 +193,6 @@ async function updateUser(req, res) {
 }
 
 /**
- * Verifies the acting admin's OWN password (reauthentication for a
- * sensitive action). `adminPassword` is checked against
- * req.user.email — the verified token's email, never a client-
- * supplied identity. Wrong/missing credentials respond 400 (NOT 401:
- * 401 means "session dead" and clients sign the admin out on it).
- *
- * @returns {boolean} true when reauthentication succeeded.
- */
-async function verifyAdminReauth(req, res, adminPassword) {
-  if (!adminPassword || typeof adminPassword !== 'string') {
-    res.status(400).json({
-      success: false,
-      message: 'Administrator password is required.',
-    });
-    return false;
-  }
-
-  const valid = await authService.verifyPassword(req.user.email, adminPassword);
-  if (!valid) {
-    res.status(400).json({
-      success: false,
-      message: 'Administrator password is incorrect.',
-    });
-    return false;
-  }
-  return true;
-}
-
-/**
  * PATCH /api/users/:uid/status
  * Body: { enabled: true | false, adminPassword? } → 200.
  * Disabling (not deleting) is the supported way to revoke access.
@@ -260,18 +232,19 @@ async function setUserEnabled(req, res) {
 /**
  * PATCH /api/users/:uid/password — admin changes ANOTHER account's
  * password (verifyAuth + requireAdmin on the route).
- * Body: { newPassword, confirmNewPassword } → 200.
+ * Body: { newPassword, confirmNewPassword, adminPassword } → 200.
  *
- * Authorization is the verified token + admin role gate on the route;
- * no admin-password reauthentication is required for this action.
- * The new password is policy-validated here and applied via Firebase
+ * Changing another account's password is sensitive: the acting admin
+ * must re-prove their OWN password (adminPassword) server-side first
+ * (verifyAdminReauth — same mechanism as disabling an account). The
+ * new password is policy-validated here and applied via Firebase
  * Admin (hashed server-side); neither password is ever logged or
  * echoed back.
  */
 async function adminSetUserPassword(req, res) {
   try {
     const { uid } = req.params;
-    const { newPassword, confirmNewPassword } = req.body || {};
+    const { newPassword, confirmNewPassword, adminPassword } = req.body || {};
 
     if (!newPassword || typeof newPassword !== 'string') {
       return res.status(400).json({
@@ -299,6 +272,9 @@ async function adminSetUserPassword(req, res) {
         message: `Password ${policyFailures.join('; ')}.`,
       });
     }
+
+    const reauthed = await verifyAdminReauth(req, res, adminPassword);
+    if (!reauthed) return;
 
     await userService.setPassword(uid, newPassword);
 
